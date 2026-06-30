@@ -7,6 +7,10 @@ import Combine
 /// audio engines and keeps them in sync with the graph.
 @MainActor
 final class MixerStore: ObservableObject {
+    /// One shared instance for the whole app. Both the main window and the menu
+    /// bar panel use this, so they always observe the same routing graph.
+    static let shared = MixerStore()
+
     @Published var inputs: [InputSource] = [] { didSet { schedulePersist(); applyGraph() } }
     @Published var outputs: [OutputTarget] = [] { didSet { schedulePersist(); applyGraph() } }
     @Published var connections: [Connection] = [] { didSet { schedulePersist(); applyGraph() } }

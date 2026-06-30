@@ -3,7 +3,7 @@ import AppKit
 
 @main
 struct AudeonApp: App {
-    @StateObject private var store = MixerStore()
+    @StateObject private var store = MixerStore.shared
 
     var body: some Scene {
         WindowGroup("Audeon") {
