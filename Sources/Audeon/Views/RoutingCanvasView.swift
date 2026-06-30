@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 
 /// Reports each pin's center in the shared "canvas" coordinate space.
 struct PinFramesKey: PreferenceKey {
@@ -24,15 +23,7 @@ struct RoutingCanvasView: View {
                         ForEach(store.inputs) { source in
                             InputCard(source: source)
                                 .transition(.scale.combined(with: .opacity))
-                                .onDrag {
-                                    store.draggingCardID = source.id
-                                    return NSItemProvider(object: source.id.uuidString as NSString)
-                                }
-                                .onDrop(of: [UTType.text], delegate: ReorderDelegate(
-                                    targetID: source.id,
-                                    dragging: { store.draggingCardID },
-                                    move: { store.moveInput(id: $0, before: $1) },
-                                    clear: { store.draggingCardID = nil }))
+                                .opacity(store.draggingCardID == source.id ? 0.5 : 1)
                         }
                         if store.inputs.isEmpty { placeholder("Use Add input to add a device or app.") }
                     }
@@ -41,15 +32,7 @@ struct RoutingCanvasView: View {
                         ForEach(store.outputs) { output in
                             OutputCard(output: output)
                                 .transition(.scale.combined(with: .opacity))
-                                .onDrag {
-                                    store.draggingCardID = output.id
-                                    return NSItemProvider(object: output.id.uuidString as NSString)
-                                }
-                                .onDrop(of: [UTType.text], delegate: ReorderDelegate(
-                                    targetID: output.id,
-                                    dragging: { store.draggingCardID },
-                                    move: { store.moveOutput(id: $0, before: $1) },
-                                    clear: { store.draggingCardID = nil }))
+                                .opacity(store.draggingCardID == output.id ? 0.5 : 1)
                         }
                         if store.outputs.isEmpty { placeholder("Use Add output to add a device.") }
                     }
@@ -142,19 +125,32 @@ struct RoutingCanvasView: View {
     }
 }
 
-// MARK: - Reorder drop delegate
+// MARK: - Drag handle for reordering
 
-private struct ReorderDelegate: DropDelegate {
-    let targetID: UUID
-    let dragging: () -> UUID?
-    let move: (UUID, UUID) -> Void
-    let clear: () -> Void
+/// A grip the user drags up or down to reorder a card. Uses the canvas
+/// coordinate space and the pin geometry, so it works reliably inside the
+/// scrolling columns where system drag and drop does not.
+private struct DragHandle: View {
+    @EnvironmentObject var store: MixerStore
+    let cardID: UUID
+    let reorder: (UUID, CGFloat) -> Void
 
-    func dropEntered(info: DropInfo) {
-        if let d = dragging(), d != targetID { withAnimation { move(d, targetID) } }
+    var body: some View {
+        Image(systemName: "line.3.horizontal")
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 2)
+            .contentShape(Rectangle())
+            .help("Drag to reorder")
+            .gesture(
+                DragGesture(minimumDistance: 3, coordinateSpace: .named("canvas"))
+                    .onChanged { v in
+                        store.draggingCardID = cardID
+                        withAnimation(.easeInOut(duration: 0.15)) { reorder(cardID, v.location.y) }
+                    }
+                    .onEnded { _ in store.draggingCardID = nil }
+            )
     }
-    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
-    func performDrop(info: DropInfo) -> Bool { clear(); return true }
 }
 
 // MARK: - Cables
@@ -292,6 +288,7 @@ private struct InputCard: View {
 
     private var header: some View {
         HStack(spacing: 8) {
+            DragHandle(cardID: source.id) { store.reorderInput($0, toNearY: $1) }
             icon
             VStack(alignment: .leading, spacing: 1) {
                 Text(store.title(for: source)).font(.system(size: 13, weight: .semibold)).lineLimit(1)
@@ -433,6 +430,7 @@ private struct OutputCard: View {
                 .onTapGesture { store.handleOutputPinTap(output.id) }
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
+                    DragHandle(cardID: output.id) { store.reorderOutput($0, toNearY: $1) }
                     Image(systemName: "hifispeaker.fill").frame(width: 22, height: 22).foregroundStyle(color)
                     Text(name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                     Spacer()

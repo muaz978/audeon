@@ -123,8 +123,8 @@ final class MixerStore: ObservableObject {
               let from = inputs.firstIndex(where: { $0.id == draggedID }),
               let to = inputs.firstIndex(where: { $0.id == targetID }) else { return }
         let item = inputs.remove(at: from)
-        let insert = inputs.firstIndex(where: { $0.id == targetID }) ?? to
-        inputs.insert(item, at: insert)
+        let insert = inputs.firstIndex(where: { $0.id == targetID }).map { from < to ? $0 + 1 : $0 } ?? to
+        inputs.insert(item, at: min(insert, inputs.count))
     }
 
     func moveOutput(id draggedID: UUID, before targetID: UUID) {
@@ -132,8 +132,26 @@ final class MixerStore: ObservableObject {
               let from = outputs.firstIndex(where: { $0.id == draggedID }),
               let to = outputs.firstIndex(where: { $0.id == targetID }) else { return }
         let item = outputs.remove(at: from)
-        let insert = outputs.firstIndex(where: { $0.id == targetID }) ?? to
-        outputs.insert(item, at: insert)
+        let insert = outputs.firstIndex(where: { $0.id == targetID }).map { from < to ? $0 + 1 : $0 } ?? to
+        outputs.insert(item, at: min(insert, outputs.count))
+    }
+
+    /// Live reorder driven by a drag handle: move the dragged card next to
+    /// whichever card's pin is nearest the pointer's vertical position.
+    func reorderInput(_ draggedID: UUID, toNearY y: CGFloat) {
+        guard let target = inputs
+            .filter({ $0.id != draggedID && pinFrames[$0.pinKey] != nil })
+            .min(by: { abs((pinFrames[$0.pinKey]!.y) - y) < abs((pinFrames[$1.pinKey]!.y) - y) })
+        else { return }
+        moveInput(id: draggedID, before: target.id)
+    }
+
+    func reorderOutput(_ draggedID: UUID, toNearY y: CGFloat) {
+        guard let target = outputs
+            .filter({ $0.id != draggedID && pinFrames[$0.pinKey] != nil })
+            .min(by: { abs((pinFrames[$0.pinKey]!.y) - y) < abs((pinFrames[$1.pinKey]!.y) - y) })
+        else { return }
+        moveOutput(id: draggedID, before: target.id)
     }
 
     // MARK: - EQ and boost
