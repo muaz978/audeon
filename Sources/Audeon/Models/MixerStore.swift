@@ -23,6 +23,7 @@ final class MixerStore: ObservableObject {
 
     private var persistWork: DispatchWorkItem?
     private let saveURL: URL
+    private var cancellables = Set<AnyCancellable>()
 
     init() {
         let dm = AudioDeviceManager()
@@ -31,6 +32,16 @@ final class MixerStore: ObservableObject {
         self.saveURL = Self.defaultSaveURL()
         load()
         applyToEngine()
+
+        // Views observe this store, but the device list and live meters live in
+        // these nested observable objects. Forward their changes so the UI
+        // refreshes when devices appear or meters move.
+        dm.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        router.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
     }
 
     // MARK: - Routing intents
