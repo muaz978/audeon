@@ -44,7 +44,31 @@ automatic dark mode.
 - The Swift toolchain (install Xcode, or the Command Line Tools with
   `xcode-select --install`).
 
-## Build and run
+## Install a release build
+
+Releases ship a zipped `.app`. The build is ad hoc signed, not notarized, so
+macOS quarantines it after download and a normal double click is refused. Open
+Terminal and paste these commands to unzip it, clear the quarantine flag, and
+launch it:
+
+```bash
+cd ~/Downloads
+unzip -o Audeon-0.1.0-macos.zip
+xattr -dr com.apple.quarantine Audeon.app
+mv Audeon.app /Applications/
+open /Applications/Audeon.app
+```
+
+If macOS still blocks it, run the binary directly to confirm it works:
+
+```bash
+/Applications/Audeon.app/Contents/MacOS/Audeon
+```
+
+If you would rather not use Terminal, unzip in Finder, right click Audeon.app,
+choose Open, then confirm. You only need to do this once.
+
+## Build and run from source
 
 The easy path builds a real `.app` bundle, which is the most reliable way to get
 the microphone permission prompt:
