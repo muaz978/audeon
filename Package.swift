@@ -6,9 +6,9 @@ import PackageDescription
 let package = Package(
     name: "Audeon",
     platforms: [
-        // macOS 13 covers the AVAudioEngine routing engine used in v1.
-        // Per-application process taps (roadmap) require macOS 14.2+.
-        .macOS(.v13)
+        // macOS 14 baseline. Per-application process taps require 14.2+ and are
+        // guarded at runtime so the rest of the app still works on 14.0/14.1.
+        .macOS(.v14)
     ],
     targets: [
         .executableTarget(

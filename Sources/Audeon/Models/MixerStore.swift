@@ -2,6 +2,13 @@ import Foundation
 import SwiftUI
 import Combine
 
+/// Which workspace the main window is showing.
+enum AppMode: String, CaseIterable, Identifiable {
+    case apps = "Apps & System"
+    case routing = "Device Routing"
+    var id: String { rawValue }
+}
+
 /// Top-level app state: the routing matrix, channel colors, presets, and
 /// persistence. Owns the AudioRouter and pushes changes into it.
 @MainActor
@@ -10,16 +17,28 @@ final class MixerStore: ObservableObject {
     @Published var colors: [String: ChannelColor] = [:] { didSet { schedulePersist() } }
     @Published var presets: [Preset] = [] { didSet { schedulePersist() } }
 
+    /// Per-application volume and redirect settings, keyed by bundle id.
+    @Published var appRedirects: [String: AppRedirect] = [:] { didSet { schedulePersist(); applyApps() } }
+
+    /// The current main-window workspace.
+    @Published var mode: AppMode = .apps
+
     /// The input endpoint currently waiting to be connected (click-to-connect).
     @Published var linkingFromInput: String?
 
     /// Drives the "save preset" sheet from the menu / shortcut.
     @Published var showSavePresetSheet: Bool = false
 
+    /// Drives the Settings sheet.
+    @Published var showSettings: Bool = false
+
     func requestSavePreset() { showSavePresetSheet = true }
 
     let deviceManager: AudioDeviceManager
     let router: AudioRouter
+    let systemAudio: SystemAudioController
+    let appManager: AppAudioManager
+    let appRedirectEngine: AppRedirectEngine
 
     private var persistWork: DispatchWorkItem?
     private let saveURL: URL
@@ -29,18 +48,32 @@ final class MixerStore: ObservableObject {
         let dm = AudioDeviceManager()
         self.deviceManager = dm
         self.router = AudioRouter(deviceManager: dm)
+        self.systemAudio = SystemAudioController(deviceManager: dm)
+        self.appManager = AppAudioManager()
+        self.appRedirectEngine = AppRedirectEngine(deviceManager: dm)
         self.saveURL = Self.defaultSaveURL()
         load()
         applyToEngine()
+        applyApps()
 
-        // Views observe this store, but the device list and live meters live in
-        // these nested observable objects. Forward their changes so the UI
-        // refreshes when devices appear or meters move.
-        dm.objectWillChange
-            .sink { [weak self] _ in self?.objectWillChange.send() }
+        // Views observe this store, but live data lives in these nested objects.
+        // Forward their change notifications so the UI refreshes.
+        for child in [dm.objectWillChange.eraseToAnyPublisher(),
+                      router.objectWillChange.eraseToAnyPublisher(),
+                      systemAudio.objectWillChange.eraseToAnyPublisher(),
+                      appManager.objectWillChange.eraseToAnyPublisher(),
+                      appRedirectEngine.objectWillChange.eraseToAnyPublisher()] {
+            child.sink { [weak self] _ in self?.objectWillChange.send() }
+                .store(in: &cancellables)
+        }
+
+        // Re-apply per-app redirects when the app list or default output changes,
+        // so a stored redirect activates as soon as its app appears.
+        appManager.$apps
+            .sink { [weak self] _ in self?.applyApps() }
             .store(in: &cancellables)
-        router.objectWillChange
-            .sink { [weak self] _ in self?.objectWillChange.send() }
+        systemAudio.$defaultOutputUID
+            .sink { [weak self] _ in self?.applyApps() }
             .store(in: &cancellables)
     }
 
@@ -118,10 +151,45 @@ final class MixerStore: ObservableObject {
         presets.removeAll { $0.id == id }
     }
 
+    // MARK: - Per-app controls
+
+    func redirect(for bundleID: String) -> AppRedirect {
+        appRedirects[bundleID] ?? AppRedirect(bundleID: bundleID)
+    }
+
+    func setAppVolume(_ volume: Double, for bundleID: String) {
+        var r = redirect(for: bundleID)
+        r.volume = max(0, min(1, volume))
+        store(r)
+    }
+
+    /// Pass nil to follow the system default output ("No Redirect").
+    func setAppOutput(_ uid: String?, for bundleID: String) {
+        var r = redirect(for: bundleID)
+        r.outputUID = uid
+        store(r)
+    }
+
+    private func store(_ r: AppRedirect) {
+        if r.outputUID == nil && r.volume >= 0.999 {
+            appRedirects[r.bundleID] = nil   // back to default, no interception
+        } else {
+            appRedirects[r.bundleID] = r
+        }
+    }
+
     // MARK: - Engine
 
     private func applyToEngine() {
         router.apply(routes: routes)
+    }
+
+    private func applyApps() {
+        appRedirectEngine.apply(
+            redirects: Array(appRedirects.values),
+            apps: appManager.apps,
+            defaultOutputUID: systemAudio.defaultOutputUID
+        )
     }
 
     // MARK: - Persistence
@@ -130,6 +198,7 @@ final class MixerStore: ObservableObject {
         var routes: [Route]
         var colors: [String: Int]
         var presets: [Preset]
+        var appRedirects: [String: AppRedirect]?
     }
 
     private func schedulePersist() {
@@ -143,7 +212,8 @@ final class MixerStore: ObservableObject {
         let payload = Persisted(
             routes: routes,
             colors: colors.mapValues { $0.rawValue },
-            presets: presets
+            presets: presets,
+            appRedirects: appRedirects
         )
         do {
             let data = try JSONEncoder().encode(payload)
@@ -161,6 +231,7 @@ final class MixerStore: ObservableObject {
         routes = payload.routes
         colors = payload.colors.compactMapValues { ChannelColor(rawValue: $0) }
         presets = payload.presets
+        appRedirects = payload.appRedirects ?? [:]
     }
 
     private static func defaultSaveURL() -> URL {

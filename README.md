@@ -19,6 +19,25 @@ creators. Audeon rebuilds that workflow from scratch on top of Apple frameworks
 at home on macOS with native menus, keyboard shortcuts, a menu bar control, and
 automatic dark mode.
 
+## Two workspaces
+
+Switch between them with the segmented control in the title bar, or from the menu
+button next to the title.
+
+### Apps & System
+
+- A System section to set the default Output, Input, and Sound Effects device,
+  with output volume and sample rate controls for the selected output.
+- An Applications section that auto-detects every running app the audio system
+  knows about, showing its icon and name with a per-app volume control and a
+  Redirect Audio To picker. Redirecting captures the app with a Core Audio
+  process tap and replays it to the chosen device at the chosen volume, so for
+  example you can send a chat app to your headphones only.
+
+### Device Routing
+
+- The original routing matrix for wiring physical inputs to outputs.
+
 ## Features
 
 - Discovers every CoreAudio input and output, and refreshes automatically when
@@ -42,7 +61,8 @@ automatic dark mode.
 
 ## Requirements
 
-- macOS 13 (Ventura) or later.
+- macOS 14 (Sonoma) or later. Per-app redirect needs macOS 14.2 or later, since
+  it relies on Core Audio process taps; the rest works on 14.0.
 - The Swift toolchain (install Xcode, or the Command Line Tools with
   `xcode-select --install`).
 
@@ -135,25 +155,37 @@ System Settings > Privacy & Security > Microphone.
 | `Views/EndpointColumnView.swift` | Input and output cards with connector dots and color pickers |
 | `Views/ConnectionsOverlay.swift` | The routing lines, drawn with anchor preferences |
 | `Views/RouteInspectorView.swift` | The mixer strips: volume, mute, solo, meters, clip |
+| `Views/AppsView.swift` | The Apps & System workspace: device pickers, per-app volume and redirect |
+| `Views/SettingsView.swift` | The Settings sheet from the menu button |
+| `Audio/SystemAudioController.swift` | Reads and sets the default Output, Input, and Sound Effects devices |
+| `Audio/AppAudioManager.swift` | Auto-detects running apps via the Core Audio process object list |
+| `Audio/AppRedirectEngine.swift` | Per-app process tap, private aggregate device, and gain passthrough |
+| `Audio/DeviceControls.swift` | Per-device volume and sample rate |
 | `AudeonApp.swift` | App entry point, native menus, and the menu bar control |
 
-Routing settings and presets are stored in
+Routing settings, presets, and per-app redirects are stored in
 `~/Library/Application Support/Audeon/config.json`.
 
 ## Roadmap
 
-Two larger features are planned. They are intentionally not in this version
-because each is a substantial subsystem, and nothing here is faked.
+Done so far: device routing, per-app volume and redirect, system default device
+pickers, per-device volume and sample rate, a menu bar control, and a settings
+menu.
 
-1. Present Audeon as a virtual device that apps like OBS, Streamlabs, and Discord
-   can select. The macOS path is a user space AudioServerPlugIn HAL driver. A
-   practical first step is to support the open source BlackHole driver as the
-   virtual endpoint, then optionally ship a signed and notarized plug in.
+Still planned, in rough priority order. These are real subsystems, not faked
+placeholders, which is why they are staged.
 
-2. Per application capture, so you can route one app (for example a chat app) to
-   your headphones only while game audio goes to the stream. The macOS path is
-   Core Audio process taps (`AudioHardwareCreateProcessTap` with an aggregate
-   device), available on macOS 14.2 and later, which needs no kernel extension.
+1. Per-app and per-device EQ and audio effects (a 10 band EQ and Audio Unit
+   hosting). The path is to run the tapped audio through an AVAudioEngine graph
+   with `AVAudioUnitEQ` and `AVAudioUnit` effects instead of the plain gain
+   passthrough.
+2. Volume boost above 100 percent, which is a software gain greater than one in
+   the same passthrough.
+3. Output Groups, so one app can play to several devices at once.
+4. Present Audeon as a virtual device for OBS, Streamlabs, and Discord, via an
+   AudioServerPlugIn driver or by supporting the open source BlackHole driver.
+5. Super volume keys, so the media keys control the focused app or device.
+6. Per-device nickname and custom icon.
 
 ## License
 
