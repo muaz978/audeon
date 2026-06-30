@@ -125,6 +125,14 @@ final class MixerStore: ObservableObject {
         if selectedConnectionID == id { selectedConnectionID = nil }
     }
 
+    func toggleConnection(sourceID: UUID, outputID: UUID) {
+        if isConnected(sourceID: sourceID, outputID: outputID) {
+            disconnect(sourceID: sourceID, outputID: outputID)
+        } else {
+            connect(sourceID: sourceID, outputID: outputID)
+        }
+    }
+
     func disconnect(sourceID: UUID, outputID: UUID) {
         connections.removeAll { $0.sourceID == sourceID && $0.outputID == outputID }
     }

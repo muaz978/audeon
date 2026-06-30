@@ -3,6 +3,7 @@ import AppKit
 
 @main
 struct AudeonApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = MixerStore.shared
 
     var body: some Scene {
@@ -25,46 +26,43 @@ struct AudeonApp: App {
                     .keyboardShortcut("k", modifiers: [.command, .shift])
             }
         }
+    }
+}
 
-        // A real window for the quick controls. Windows observe the shared store
-        // reliably, unlike a MenuBarExtra window-style panel.
-        Window("Quick Controls", id: "quickControls") {
-            QuickControlsView()
-                .environmentObject(store)
+/// Owns the menu bar status item and a popover anchored to it. Built with
+/// AppKit so the popover reliably drops down from the icon and observes the
+/// shared store, which the SwiftUI MenuBarExtra panel did not do here.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var statusItem: NSStatusItem!
+    private let popover = NSPopover()
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        popover.behavior = .transient
+        popover.contentSize = NSSize(width: 340, height: 520)
+        popover.contentViewController = NSHostingController(
+            rootView: QuickControlsView().environmentObject(MixerStore.shared))
+
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = statusItem.button {
+            button.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "Audeon")
+            button.action = #selector(togglePopover(_:))
+            button.target = self
         }
-        .windowResizability(.contentSize)
-        .defaultPosition(.topTrailing)
+    }
 
-        // The menu bar item is a plain menu (always reliable) that opens the
-        // quick controls window or the main window.
-        MenuBarExtra("Audeon", systemImage: "slider.horizontal.3") {
-            MenuBarMenu()
+    @objc private func togglePopover(_ sender: Any?) {
+        guard let button = statusItem.button else { return }
+        if popover.isShown {
+            popover.performClose(sender)
+        } else {
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            popover.contentViewController?.view.window?.makeKey()
         }
     }
 }
 
-/// The menu shown from the menu bar icon. Plain buttons, which always render.
-private struct MenuBarMenu: View {
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        Button("Quick Controls...") {
-            openWindow(id: "quickControls")
-            NSApp.activate(ignoringOtherApps: true)
-        }
-        Button("Open Audeon") { NSApp.activate(ignoringOtherApps: true) }
-        Divider()
-        Button("Refresh Devices & Apps") {
-            MixerStore.shared.deviceManager.refresh()
-            MixerStore.shared.appManager.refresh()
-        }
-        Divider()
-        Button("Quit Audeon") { NSApplication.shared.terminate(nil) }
-    }
-}
-
-/// Compact quick-controls window mirroring the main controls: per input and
-/// output volume and mute, plus boost and EQ for inputs.
+/// The quick controls shown in the menu bar popover. Mirrors the main controls
+/// and can also change which outputs each input is routed to.
 private struct QuickControlsView: View {
     @EnvironmentObject var store: MixerStore
 
@@ -72,11 +70,14 @@ private struct QuickControlsView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Image(systemName: "slider.horizontal.3")
-                Text("Quick Controls").font(.headline)
+                Text("Audeon").font(.headline)
                 Spacer()
-                Button { NSApp.activate(ignoringOtherApps: true) } label: {
-                    Image(systemName: "macwindow")
-                }.help("Open the main window")
+                Button {
+                    NSApp.activate(ignoringOtherApps: true)
+                    for w in NSApp.windows where w.canBecomeMain { w.makeKeyAndOrderFront(nil); break }
+                } label: {
+                    Label("Open", systemImage: "macwindow")
+                }.controlSize(.small)
             }
             Divider()
             if store.inputs.isEmpty && store.outputs.isEmpty {
@@ -98,7 +99,7 @@ private struct QuickControlsView: View {
                         }
                     }
                 }
-                .frame(maxHeight: 420)
+                .frame(maxHeight: 400)
             }
             Divider()
             HStack {
@@ -116,7 +117,7 @@ private struct QuickControlsView: View {
     @ViewBuilder
     private func inputRow(_ source: InputSource) -> some View {
         let color = store.color(forPin: source.pinKey).color
-        let connected = store.connectedOutputs(for: source.id).count
+        let connectedCount = store.connectedOutputs(for: source.id).count
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
                 Circle().fill(color.opacity(store.isActive(source) ? 1 : 0.4)).frame(width: 8, height: 8)
@@ -125,8 +126,7 @@ private struct QuickControlsView: View {
                     Image(systemName: "moon.zzz.fill").font(.system(size: 9)).foregroundStyle(.orange)
                 }
                 Spacer()
-                Text(connected == 0 ? "Not routed" : "\(connected) out")
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                routeMenu(source)
             }
             HStack(spacing: 8) {
                 Button { store.updateInput(source.id) { $0.isMuted.toggle() } } label: {
@@ -151,6 +151,29 @@ private struct QuickControlsView: View {
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 8).fill(color.opacity(0.10)))
+    }
+
+    /// Menu to connect or disconnect this input from each output.
+    private func routeMenu(_ source: InputSource) -> some View {
+        let count = store.connectedOutputs(for: source.id).count
+        return Menu {
+            if store.outputs.isEmpty {
+                Text("Add an output first")
+            } else {
+                ForEach(store.outputs) { o in
+                    let on = store.isConnected(sourceID: source.id, outputID: o.id)
+                    Button {
+                        store.toggleConnection(sourceID: source.id, outputID: o.id)
+                    } label: {
+                        Label(store.deviceManager.endpoint(forUID: o.uid)?.name ?? "Output",
+                              systemImage: on ? "checkmark.circle.fill" : "circle")
+                    }
+                }
+            }
+        } label: {
+            Text(count == 0 ? "Route" : "\(count) out").font(.system(size: 10))
+        }
+        .menuStyle(.borderlessButton).fixedSize()
     }
 
     @ViewBuilder
