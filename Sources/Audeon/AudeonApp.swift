@@ -218,7 +218,7 @@ private struct QuickControlsView: View {
                 } else {
                     VStack(spacing: 0) {
                         if !compact { columnHeader(deviceTitle: "Redirect Audio To") }
-                        ForEach(Array(store.inputs.enumerated()), id: \.element.id) { idx, source in
+                        ForEach(Array(store.inputsFavoritesFirst.enumerated()), id: \.element.id) { idx, source in
                             if idx > 0 { Divider().padding(.leading, 30) }
                             appRow(source)
                         }
@@ -237,9 +237,11 @@ private struct QuickControlsView: View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
                 HStack(spacing: 6) {
-                    Button { store.removeInput(source.id) } label: {
-                        Image(systemName: "star.fill").font(.system(size: 11)).foregroundStyle(.yellow)
-                    }.buttonStyle(.borderless).help("Remove from list")
+                    Button { store.toggleFavorite(source.id) } label: {
+                        Image(systemName: source.isFavorite ? "star.fill" : "star")
+                            .font(.system(size: 11))
+                            .foregroundStyle(source.isFavorite ? .yellow : .secondary)
+                    }.buttonStyle(.borderless).help(source.isFavorite ? "Unfavorite" : "Favorite")
                     appIcon(source, color: color)
                     Text(store.title(for: source)).font(.system(size: 13, weight: .medium)).lineLimit(1)
                         .opacity(store.isActive(source) ? 1 : 0.6)
@@ -268,6 +270,11 @@ private struct QuickControlsView: View {
             if isOpen && !compact { eqPanel(source, color: color) }
         }
         .padding(.vertical, 7)
+        .contextMenu {
+            Button(source.isFavorite ? "Unfavorite" : "Favorite") { store.toggleFavorite(source.id) }
+            Divider()
+            Button("Remove from Audeon", role: .destructive) { store.removeInput(source.id) }
+        }
     }
 
     private func eqPanel(_ source: InputSource, color: Color) -> some View {

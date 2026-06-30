@@ -16,10 +16,11 @@ struct InputSource: Identifiable, Codable, Equatable {
     var eqEnabled: Bool
     var eq: [Double]       // per band gain in dB, length AudioEQ.bandCount
     var displayName: String?   // remembered name so closed apps still read well
+    var isFavorite: Bool       // pinned to the top of the menu bar list
 
     init(id: UUID = UUID(), kind: SourceKind, volume: Double = 1.0, isMuted: Bool = false,
          boost: Double = 1.0, eqEnabled: Bool = false, eq: [Double] = AudioEQ.flat,
-         displayName: String? = nil) {
+         displayName: String? = nil, isFavorite: Bool = false) {
         self.id = id
         self.kind = kind
         self.volume = volume
@@ -28,9 +29,10 @@ struct InputSource: Identifiable, Codable, Equatable {
         self.eqEnabled = eqEnabled
         self.eq = eq
         self.displayName = displayName
+        self.isFavorite = isFavorite
     }
 
-    enum CodingKeys: String, CodingKey { case id, kind, volume, isMuted, boost, eqEnabled, eq, displayName }
+    enum CodingKeys: String, CodingKey { case id, kind, volume, isMuted, boost, eqEnabled, eq, displayName, isFavorite }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -43,6 +45,7 @@ struct InputSource: Identifiable, Codable, Equatable {
         let stored = try c.decodeIfPresent([Double].self, forKey: .eq) ?? AudioEQ.flat
         eq = stored.count == AudioEQ.bandCount ? stored : AudioEQ.flat
         displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
+        isFavorite = try c.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
     }
 
     var appBundleID: String? { if case .app(let b) = kind { return b } else { return nil } }

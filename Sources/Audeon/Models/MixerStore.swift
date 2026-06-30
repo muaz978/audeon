@@ -211,6 +211,16 @@ final class MixerStore: ObservableObject {
 
     // MARK: - EQ and boost
 
+    func toggleFavorite(_ sourceID: UUID) { updateInput(sourceID) { $0.isFavorite.toggle() } }
+
+    /// Inputs with favorites first (used by the menu bar list).
+    var inputsFavoritesFirst: [InputSource] {
+        inputs.enumerated().sorted {
+            if $0.element.isFavorite != $1.element.isFavorite { return $0.element.isFavorite }
+            return $0.offset < $1.offset
+        }.map { $0.element }
+    }
+
     func setBoost(_ value: Double, for sourceID: UUID) { updateInput(sourceID) { $0.boost = value } }
     func toggleEQ(for sourceID: UUID) { updateInput(sourceID) { $0.eqEnabled.toggle() } }
     func setEQBand(_ index: Int, _ gain: Double, for sourceID: UUID) {
