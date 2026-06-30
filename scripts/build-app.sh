@@ -23,6 +23,7 @@ mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
 cp "$BIN_PATH/Audeon" "$APP/Contents/MacOS/Audeon"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+cp Icon/Audeon.icns "$APP/Contents/Resources/Audeon.icns"
 
 # Ad-hoc sign so the bundle has a stable identity for TCC across launches.
 codesign --force --sign - "$APP" >/dev/null 2>&1 || true

@@ -1,5 +1,7 @@
 # Audeon
 
+<img src="Icon/Audeon-icon-1024.png" alt="Audeon icon" width="160" />
+
 Audeon is a native macOS audio routing and monitoring app for streamers, gamers,
 podcasters, and anyone who needs to send several audio sources to several
 destinations at once. You build a routing matrix on a simple two column canvas,
