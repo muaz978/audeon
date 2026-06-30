@@ -9,9 +9,9 @@
     <key>CFBundleIdentifier</key>
     <string>io.github.muaz978.audeon</string>
     <key>CFBundleVersion</key>
-    <string>20</string>
+    <string>21</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.5.2</string>
+    <string>0.5.3</string>
     <key>CFBundleIconFile</key>
     <string>Audeon</string>
     <key>CFBundlePackageType</key>

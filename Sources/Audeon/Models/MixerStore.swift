@@ -15,6 +15,8 @@ final class MixerStore: ObservableObject {
     @Published var outputs: [OutputTarget] = [] { didSet { schedulePersist(); applyGraph() } }
     @Published var connections: [Connection] = [] { didSet { schedulePersist(); applyGraph() } }
     @Published var colors: [String: ChannelColor] = [:] { didSet { schedulePersist() } }
+    /// Optional friendly names per device uid.
+    @Published var deviceNicknames: [String: String] = [:] { didSet { schedulePersist() } }
 
     // Transient connect interaction.
     @Published var pendingSourceID: UUID?          // click a source pin, then an output pin
@@ -211,6 +213,17 @@ final class MixerStore: ObservableObject {
 
     // MARK: - EQ and boost
 
+    /// Friendly display name for a device, using a nickname when set.
+    func deviceName(forUID uid: String) -> String {
+        if let nick = deviceNicknames[uid], !nick.isEmpty { return nick }
+        return deviceManager.endpoint(forUID: uid)?.name ?? "Unknown"
+    }
+
+    func setNickname(_ name: String, forUID uid: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { deviceNicknames[uid] = nil } else { deviceNicknames[uid] = trimmed }
+    }
+
     func toggleFavorite(_ sourceID: UUID) { updateInput(sourceID) { $0.isFavorite.toggle() } }
 
     /// Inputs with favorites first (used by the menu bar list).
@@ -361,6 +374,7 @@ final class MixerStore: ObservableObject {
         var outputs: [OutputTarget]
         var connections: [Connection]
         var colors: [String: Int]
+        var deviceNicknames: [String: String]?
     }
 
     private func schedulePersist() {
@@ -373,7 +387,8 @@ final class MixerStore: ObservableObject {
     private func persist() {
         let payload = Persisted(
             inputs: inputs, outputs: outputs, connections: connections,
-            colors: colors.mapValues { $0.rawValue }
+            colors: colors.mapValues { $0.rawValue },
+            deviceNicknames: deviceNicknames
         )
         do {
             let data = try JSONEncoder().encode(payload)
@@ -392,6 +407,7 @@ final class MixerStore: ObservableObject {
         outputs = payload.outputs
         connections = payload.connections
         colors = payload.colors.compactMapValues { ChannelColor(rawValue: $0) }
+        deviceNicknames = payload.deviceNicknames ?? [:]
     }
 
     private static func defaultSaveURL() -> URL {

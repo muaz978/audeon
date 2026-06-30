@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import AVFoundation
 
 @main
 struct AudeonApp: App {
@@ -47,6 +48,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "Audeon")
             button.action = #selector(togglePopover(_:))
             button.target = self
+        }
+
+        requestPermissionsOnFirstLaunch()
+    }
+
+    /// On first launch, request Microphone access (so the system prompt appears
+    /// right after install) and show a one-time welcome guiding the user.
+    private func requestPermissionsOnFirstLaunch() {
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { _ in }
+        }
+        guard !UserDefaults.standard.bool(forKey: "didWelcome") else { return }
+        UserDefaults.standard.set(true, forKey: "didWelcome")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            let alert = NSAlert()
+            alert.messageText = "Welcome to Audeon"
+            alert.informativeText = "Audeon needs Microphone access to read your audio devices, and it captures application audio with Core Audio process taps. Please allow access when prompted.\n\nYou can review this anytime in System Settings > Privacy & Security > Microphone."
+            alert.addButton(withTitle: "Open Privacy Settings")
+            alert.addButton(withTitle: "Later")
+            if alert.runModal() == .alertFirstButtonReturn,
+               let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                NSWorkspace.shared.open(url)
+            }
         }
     }
 
