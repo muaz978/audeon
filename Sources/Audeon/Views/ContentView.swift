@@ -22,6 +22,9 @@ struct ContentView: View {
             if store.mode == .apps {
                 AppsView()
             } else {
+                if let from = store.linkingFromInput {
+                    linkingBanner(from)
+                }
                 routingArea
                 Divider()
                 RouteInspectorView()
@@ -103,6 +106,25 @@ struct ContentView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
+    }
+
+    // MARK: - Linking hint
+
+    private func linkingBanner(_ fromKey: String) -> some View {
+        let rawUID = AudioEndpoint.uid(fromKey: fromKey)
+        let name = store.deviceManager.endpoint(forUID: rawUID)?.name ?? "input"
+        return HStack(spacing: 8) {
+            Image(systemName: "point.topleft.down.curvedto.point.bottomright.up.fill")
+                .foregroundStyle(store.color(for: rawUID).color)
+            Text("Connecting \(name). Click an output to finish, or click the input again to cancel.")
+                .font(.caption)
+            Spacer()
+            Button("Cancel") { store.linkingFromInput = nil }
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(store.color(for: rawUID).color.opacity(0.15))
     }
 
     // MARK: - Routing canvas

@@ -26,7 +26,8 @@ struct AppsView: View {
                 devices: store.deviceManager.outputs,
                 selectedUID: store.systemAudio.defaultOutputUID,
                 onSelect: { store.systemAudio.setDefaultOutput($0) },
-                showVolumeAndRate: true
+                scope: .output,
+                showRate: true
             )
             Divider().padding(.leading, 44)
             DeviceRow(
@@ -35,7 +36,8 @@ struct AppsView: View {
                 devices: store.deviceManager.inputs,
                 selectedUID: store.systemAudio.defaultInputUID,
                 onSelect: { store.systemAudio.setDefaultInput($0) },
-                showVolumeAndRate: false
+                scope: .input,
+                showRate: true
             )
             Divider().padding(.leading, 44)
             DeviceRow(
@@ -44,7 +46,8 @@ struct AppsView: View {
                 devices: store.deviceManager.outputs,
                 selectedUID: store.systemAudio.defaultSystemOutputUID,
                 onSelect: { store.systemAudio.setDefaultSystemOutput($0) },
-                showVolumeAndRate: false
+                scope: .output,
+                showRate: false
             )
         }
     }
@@ -97,7 +100,8 @@ private struct DeviceRow: View {
     let devices: [AudioEndpoint]
     let selectedUID: String?
     let onSelect: (String) -> Void
-    let showVolumeAndRate: Bool
+    let scope: EndpointKind
+    let showRate: Bool
 
     private var selectedName: String {
         guard let uid = selectedUID else { return "Default" }
@@ -111,12 +115,12 @@ private struct DeviceRow: View {
                 .foregroundStyle(.secondary)
             Text(title)
                 .font(.system(size: 13, weight: .medium))
-                .frame(width: 110, alignment: .leading)
+                .frame(width: 100, alignment: .leading)
 
-            if showVolumeAndRate, let uid = selectedUID {
-                DeviceVolumeSlider(uid: uid)
-                    .frame(maxWidth: 160)
-                SampleRateMenu(uid: uid)
+            if let uid = selectedUID {
+                DeviceVolumeSlider(uid: uid, scope: scope)
+                    .frame(maxWidth: 170)
+                if showRate { SampleRateMenu(uid: uid) }
             }
 
             Spacer()
@@ -142,22 +146,40 @@ private struct DeviceRow: View {
 private struct DeviceVolumeSlider: View {
     @EnvironmentObject var store: MixerStore
     let uid: String
+    let scope: EndpointKind
     @State private var value: Double = 0
+    @State private var hasControl = true
+
+    private func read() -> Float? {
+        scope == .input ? store.deviceManager.inputVolume(forUID: uid)
+                        : store.deviceManager.outputVolume(forUID: uid)
+    }
+    private func write(_ v: Float) {
+        if scope == .input { store.deviceManager.setInputVolume(v, forUID: uid) }
+        else { store.deviceManager.setOutputVolume(v, forUID: uid) }
+    }
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: "speaker.fill").font(.system(size: 10)).foregroundStyle(.secondary)
-            Slider(value: $value, in: 0...1) { editing in
-                if !editing { store.deviceManager.setOutputVolume(Float(value), forUID: uid) }
+            Image(systemName: scope == .input ? "mic.fill" : "speaker.fill")
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+            if hasControl {
+                Slider(value: $value, in: 0...1)
+                    .controlSize(.small)
+                    .onChange(of: value) { write(Float($0)) }
+                Text("\(Int(value * 100))%")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 34, alignment: .trailing)
+            } else {
+                Text("No software volume")
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
             }
-            .controlSize(.small)
-            .onChange(of: value) { store.deviceManager.setOutputVolume(Float($0), forUID: uid) }
-            Text("\(Int(value * 100))%")
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 34, alignment: .trailing)
         }
-        .onAppear { value = Double(store.deviceManager.outputVolume(forUID: uid) ?? 0) }
+        .onAppear {
+            if let v = read() { value = Double(v); hasControl = true }
+            else { hasControl = false }
+        }
         .id(uid)
     }
 }

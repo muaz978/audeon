@@ -80,8 +80,8 @@ final class AudioRouter: ObservableObject {
     }
 
     private func start(_ route: Route, gain: Float) {
-        guard let inID = deviceManager.deviceID(forUID: route.inputUID),
-              let outID = deviceManager.deviceID(forUID: route.outputUID) else {
+        guard let inID = deviceManager.deviceID(forUID: route.inputDeviceUID),
+              let outID = deviceManager.deviceID(forUID: route.outputDeviceUID) else {
             return
         }
         let engine = RouteEngine(routeID: route.id, inputDevice: inID, outputDevice: outID) { [weak self] id, reading in

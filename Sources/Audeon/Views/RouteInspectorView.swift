@@ -54,7 +54,7 @@ struct RouteInspectorView: View {
             Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
                 .font(.title2)
                 .foregroundStyle(.tertiary)
-            Text("Tap an input dot, then an output dot, to create a route.")
+            Text("Click an input, then click an output, to create a route.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -66,10 +66,10 @@ private struct RouteStrip: View {
     @EnvironmentObject var store: MixerStore
     let route: Route
 
-    private var inName: String { store.deviceManager.endpoint(forUID: route.inputUID)?.name ?? "?" }
-    private var outName: String { store.deviceManager.endpoint(forUID: route.outputUID)?.name ?? "?" }
+    private var inName: String { store.deviceManager.endpoint(forUID: route.inputDeviceUID)?.name ?? "?" }
+    private var outName: String { store.deviceManager.endpoint(forUID: route.outputDeviceUID)?.name ?? "?" }
     private var reading: MeterReading { store.router.levels[route.id] ?? .silent }
-    private var color: Color { store.color(for: route.inputUID).color }
+    private var color: Color { store.color(for: route.inputDeviceUID).color }
     private var dimmed: Bool { route.isMuted || (store.anySolo && !route.isSoloed) }
 
     var body: some View {

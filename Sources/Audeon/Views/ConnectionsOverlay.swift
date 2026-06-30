@@ -16,7 +16,7 @@ struct ConnectionsOverlay: View {
                     let p2 = proxy[to]
                     routePath(p1, p2)
                         .stroke(
-                            store.color(for: route.inputUID).color.opacity(route.isMuted ? 0.25 : 0.9),
+                            store.color(for: route.inputDeviceUID).color.opacity(route.isMuted ? 0.25 : 0.9),
                             style: StrokeStyle(lineWidth: route.isMuted ? 1.5 : 2.5,
                                                lineCap: .round,
                                                dash: route.isMuted ? [4, 4] : [])

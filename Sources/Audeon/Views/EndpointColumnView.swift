@@ -44,10 +44,10 @@ private struct EndpointCard: View {
     private var isInput: Bool { endpoint.kind == .input }
     private var color: Color { store.color(for: endpoint.uid).color }
 
-    private var isLinking: Bool { store.linkingFromInput == endpoint.uid }
+    private var isLinking: Bool { store.linkingFromInput == endpoint.key }
     private var routeCount: Int {
-        isInput ? store.routes(forInput: endpoint.uid).count
-                : store.routes(forOutput: endpoint.uid).count
+        isInput ? store.routes(forInput: endpoint.key).count
+                : store.routes(forOutput: endpoint.key).count
     }
 
     var body: some View {
@@ -95,9 +95,8 @@ private struct EndpointCard: View {
             .frame(width: 14, height: 14)
             .overlay(Circle().strokeBorder(.white.opacity(0.7), lineWidth: 1.5))
             .anchorPreference(key: ConnectorAnchorKey.self, value: .center) {
-                [endpoint.uid: $0]
+                [endpoint.key: $0]
             }
-            .onTapGesture { tap() }
     }
 
     private var colorPicker: some View {
@@ -121,9 +120,9 @@ private struct EndpointCard: View {
 
     private func tap() {
         if isInput {
-            store.beginLink(fromInput: endpoint.uid)
+            store.beginLink(fromInput: endpoint.key)
         } else {
-            store.completeLink(toOutput: endpoint.uid)
+            store.completeLink(toOutput: endpoint.key)
         }
     }
 }

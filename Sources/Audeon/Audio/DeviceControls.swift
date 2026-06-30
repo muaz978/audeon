@@ -5,14 +5,35 @@ import CoreAudio
 /// and sample rate. These map to standard CoreAudio device properties.
 extension AudioDeviceManager {
 
-    // MARK: - Output volume (0...1)
+    // MARK: - Volume (0...1)
 
     func outputVolume(forUID uid: String) -> Float? {
+        volume(forUID: uid, scope: kAudioObjectPropertyScopeOutput)
+    }
+    func setOutputVolume(_ value: Float, forUID uid: String) {
+        setVolume(value, forUID: uid, scope: kAudioObjectPropertyScopeOutput)
+    }
+    func inputVolume(forUID uid: String) -> Float? {
+        volume(forUID: uid, scope: kAudioObjectPropertyScopeInput)
+    }
+    func setInputVolume(_ value: Float, forUID uid: String) {
+        setVolume(value, forUID: uid, scope: kAudioObjectPropertyScopeInput)
+    }
+
+    /// True when the device exposes any settable software volume in this scope.
+    func hasVolumeControl(forUID uid: String, scope: AudioObjectPropertyScope) -> Bool {
+        guard let id = deviceID(forUID: uid) else { return false }
+        return [kAudioObjectPropertyElementMain, 1, 2].contains {
+            var addr = Self.volumeAddress($0, scope)
+            return AudioObjectHasProperty(id, &addr)
+        }
+    }
+
+    private func volume(forUID uid: String, scope: AudioObjectPropertyScope) -> Float? {
         guard let id = deviceID(forUID: uid) else { return nil }
-        if let v = Self.volume(id, element: kAudioObjectPropertyElementMain) { return v }
-        // Fall back to the average of the first two channels.
-        let l = Self.volume(id, element: 1)
-        let r = Self.volume(id, element: 2)
+        if let v = Self.volume(id, element: kAudioObjectPropertyElementMain, scope: scope) { return v }
+        let l = Self.volume(id, element: 1, scope: scope)
+        let r = Self.volume(id, element: 2, scope: scope)
         switch (l, r) {
         case let (l?, r?): return (l + r) / 2
         case let (l?, nil): return l
@@ -21,24 +42,24 @@ extension AudioDeviceManager {
         }
     }
 
-    func setOutputVolume(_ value: Float, forUID uid: String) {
+    private func setVolume(_ value: Float, forUID uid: String, scope: AudioObjectPropertyScope) {
         guard let id = deviceID(forUID: uid) else { return }
         let v = max(0, min(1, value))
-        if Self.setVolume(id, element: kAudioObjectPropertyElementMain, value: v) { return }
-        _ = Self.setVolume(id, element: 1, value: v)
-        _ = Self.setVolume(id, element: 2, value: v)
+        if Self.setVolume(id, element: kAudioObjectPropertyElementMain, scope: scope, value: v) { return }
+        _ = Self.setVolume(id, element: 1, scope: scope, value: v)
+        _ = Self.setVolume(id, element: 2, scope: scope, value: v)
     }
 
-    private static func volumeAddress(_ element: AudioObjectPropertyElement) -> AudioObjectPropertyAddress {
+    private static func volumeAddress(_ element: AudioObjectPropertyElement, _ scope: AudioObjectPropertyScope) -> AudioObjectPropertyAddress {
         AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyVolumeScalar,
-            mScope: kAudioObjectPropertyScopeOutput,
+            mScope: scope,
             mElement: element
         )
     }
 
-    private static func volume(_ id: AudioObjectID, element: AudioObjectPropertyElement) -> Float? {
-        var addr = volumeAddress(element)
+    private static func volume(_ id: AudioObjectID, element: AudioObjectPropertyElement, scope: AudioObjectPropertyScope) -> Float? {
+        var addr = volumeAddress(element, scope)
         guard AudioObjectHasProperty(id, &addr) else { return nil }
         var size = UInt32(MemoryLayout<Float32>.size)
         var v: Float32 = 0
@@ -46,8 +67,8 @@ extension AudioDeviceManager {
         return v
     }
 
-    private static func setVolume(_ id: AudioObjectID, element: AudioObjectPropertyElement, value: Float) -> Bool {
-        var addr = volumeAddress(element)
+    private static func setVolume(_ id: AudioObjectID, element: AudioObjectPropertyElement, scope: AudioObjectPropertyScope, value: Float) -> Bool {
+        var addr = volumeAddress(element, scope)
         guard AudioObjectHasProperty(id, &addr) else { return false }
         var settable: DarwinBoolean = false
         guard AudioObjectIsPropertySettable(id, &addr, &settable) == noErr, settable.boolValue else { return false }

@@ -16,7 +16,16 @@ struct AudioEndpoint: Identifiable, Hashable {
     let name: String         // human readable
     let kind: EndpointKind   // input or output
 
-    var id: String { uid }
+    /// Direction-qualified identity. A device that is both an input and an
+    /// output shares one `uid`, so routes and anchors must key off this instead.
+    var key: String { "\(kind.rawValue):\(uid)" }
+    var id: String { key }
+
+    /// Recover the raw device uid from a direction-qualified key.
+    static func uid(fromKey key: String) -> String {
+        if let range = key.range(of: ":") { return String(key[range.upperBound...]) }
+        return key
+    }
 }
 
 /// Enumerates CoreAudio devices and republishes whenever the device list

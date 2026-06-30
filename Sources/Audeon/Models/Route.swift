@@ -25,11 +25,15 @@ enum ChannelColor: Int, Codable, CaseIterable, Identifiable {
 /// A live audio route from an input endpoint to an output endpoint.
 struct Route: Identifiable, Codable, Equatable {
     let id: UUID
-    var inputUID: String
-    var outputUID: String
+    var inputUID: String     // direction-qualified endpoint key, e.g. "input:UID"
+    var outputUID: String    // direction-qualified endpoint key, e.g. "output:UID"
     var volume: Double   // 0...1
     var isMuted: Bool
     var isSoloed: Bool
+
+    /// Raw device uids for engine wiring, stripped of the direction prefix.
+    var inputDeviceUID: String { AudioEndpoint.uid(fromKey: inputUID) }
+    var outputDeviceUID: String { AudioEndpoint.uid(fromKey: outputUID) }
 
     init(id: UUID = UUID(),
          inputUID: String,
