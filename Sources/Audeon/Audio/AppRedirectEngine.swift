@@ -18,6 +18,7 @@ struct AppTapRequest: Equatable {
     let boost: Double
     let eqEnabled: Bool
     let eq: [Double]
+    let magicBoost: Bool
 }
 
 /// Captures an app's audio with a Core Audio process tap and replays it through
@@ -26,6 +27,8 @@ struct AppTapRequest: Equatable {
 /// app can feed several outputs at once.
 final class AppRedirectEngine: ObservableObject {
     @Published private(set) var lastError: String?
+    /// Live meter per (bundleID, outputUID) key, same key as `units`.
+    @Published private(set) var levels: [String: MeterReading] = [:]
 
     private let deviceManager: AudioDeviceManager
     private var units: [String: TapUnit] = [:]   // key: "bundleID|outputUID"
@@ -48,14 +51,17 @@ final class AppRedirectEngine: ObservableObject {
 
         for (k, unit) in units {
             if let w = wanted[k], w.processObject == unit.process {
-                unit.configure(volume: w.volume, boost: w.boost, eqEnabled: w.eqEnabled, eq: w.eq)
+                unit.configure(volume: w.volume, boost: w.boost, eqEnabled: w.eqEnabled, eq: w.eq, magicBoost: w.magicBoost)
             } else {
                 unit.stop(); units[k] = nil
+                DispatchQueue.main.async { self.levels[k] = nil }
             }
         }
 
         for (k, w) in wanted where units[k] == nil {
-            if let unit = TapUnit(request: w) {
+            if let unit = TapUnit(request: w, onLevel: { [weak self] reading in
+                DispatchQueue.main.async { self?.levels[k] = reading }
+            }) {
                 units[k] = unit
             } else {
                 DispatchQueue.main.async { self.lastError = "Could not capture \(w.bundleID)" }
@@ -67,6 +73,7 @@ final class AppRedirectEngine: ObservableObject {
         lock.lock(); defer { lock.unlock() }
         units.values.forEach { $0.stop() }
         units.removeAll()
+        DispatchQueue.main.async { self.levels.removeAll() }
     }
 
     /// Destroy any private aggregate devices left behind by a previous run.
@@ -103,10 +110,14 @@ private final class TapUnit {
     private var aggregateID: AudioObjectID = 0
     private let engine = AVAudioEngine()
     private let eq = AVAudioUnitEQ(numberOfBands: AudioEQ.bandCount)
+    private let magicBoost = MagicBoost.makeEffect()
     private var started = false
+    private let onLevel: (MeterReading) -> Void
+    private let throttle = MeterThrottle()
 
-    init?(request: AppTapRequest) {
+    init?(request: AppTapRequest, onLevel: @escaping (MeterReading) -> Void) {
         self.process = request.processObject
+        self.onLevel = onLevel
 
         guard #available(macOS 14.2, *) else { cleanup(); return nil }
 
@@ -144,30 +155,42 @@ private final class TapUnit {
             band.bypass = true
         }
         engine.attach(eq)
+        engine.attach(magicBoost)
         let fmt = engine.inputNode.outputFormat(forBus: 0)
         engine.connect(engine.inputNode, to: eq, format: fmt)
-        engine.connect(eq, to: engine.mainMixerNode, format: fmt)
+        engine.connect(eq, to: magicBoost, format: fmt)
+        engine.connect(magicBoost, to: engine.mainMixerNode, format: fmt)
         engine.connect(engine.mainMixerNode, to: engine.outputNode,
                        format: engine.outputNode.inputFormat(forBus: 0))
-        configure(volume: request.volume, boost: request.boost, eqEnabled: request.eqEnabled, eq: request.eq)
+        configure(volume: request.volume, boost: request.boost, eqEnabled: request.eqEnabled,
+                 eq: request.eq, magicBoost: request.magicBoost)
+
+        let onLevel = self.onLevel
+        let throttle = self.throttle
+        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024,
+                                        format: engine.mainMixerNode.outputFormat(forBus: 0)) { buffer, _ in
+            guard throttle.shouldFire() else { return }
+            onLevel(AudioMeter.reading(for: buffer))
+        }
 
         do { engine.prepare(); try engine.start(); started = true }
         catch { cleanup(); return nil }
     }
 
-    func configure(volume: Float, boost: Double, eqEnabled: Bool, eq gains: [Double]) {
+    func configure(volume: Float, boost: Double, eqEnabled: Bool, eq gains: [Double], magicBoost magicBoostEnabled: Bool) {
         engine.mainMixerNode.outputVolume = volume
         eq.globalGain = volume <= 0 ? -96 : AudioEQ.boostDecibels(boost)
         for (i, band) in eq.bands.enumerated() where i < gains.count {
             band.bypass = !eqEnabled
             band.gain = Float(gains[i])
         }
+        MagicBoost.configure(magicBoost, enabled: magicBoostEnabled)
     }
 
     func stop() { cleanup() }
 
     private func cleanup() {
-        if started { engine.stop(); started = false }
+        if started { engine.mainMixerNode.removeTap(onBus: 0); engine.stop(); started = false }
         if aggregateID != 0 { AudioHardwareDestroyAggregateDevice(aggregateID); aggregateID = 0 }
         if tapID != 0 {
             if #available(macOS 14.2, *) { AudioHardwareDestroyProcessTap(tapID) }

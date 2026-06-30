@@ -18,11 +18,14 @@ struct InputSource: Identifiable, Codable, Equatable {
     var displayName: String?   // remembered name so closed apps still read well
     var isFavorite: Bool       // pinned to the top of the menu bar list
     var followsSystemOutput: Bool = false   // auto-route to the current default output
+    var magicBoost: Bool = false   // dynamics compressor: lifts quiet audio, tames loud peaks
 
     init(id: UUID = UUID(), kind: SourceKind, volume: Double = 1.0, isMuted: Bool = false,
          boost: Double = 1.0, eqEnabled: Bool = false, eq: [Double] = AudioEQ.flat,
-         displayName: String? = nil, isFavorite: Bool = false, followsSystemOutput: Bool = false) {
+         displayName: String? = nil, isFavorite: Bool = false, followsSystemOutput: Bool = false,
+         magicBoost: Bool = false) {
         self.followsSystemOutput = followsSystemOutput
+        self.magicBoost = magicBoost
         self.id = id
         self.kind = kind
         self.volume = volume
@@ -35,7 +38,7 @@ struct InputSource: Identifiable, Codable, Equatable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, volume, isMuted, boost, eqEnabled, eq, displayName, isFavorite, followsSystemOutput
+        case id, kind, volume, isMuted, boost, eqEnabled, eq, displayName, isFavorite, followsSystemOutput, magicBoost
     }
 
     init(from decoder: Decoder) throws {
@@ -51,6 +54,7 @@ struct InputSource: Identifiable, Codable, Equatable {
         displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
         isFavorite = try c.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
         followsSystemOutput = try c.decodeIfPresent(Bool.self, forKey: .followsSystemOutput) ?? false
+        magicBoost = try c.decodeIfPresent(Bool.self, forKey: .magicBoost) ?? false
     }
 
     var appBundleID: String? { if case .app(let b) = kind { return b } else { return nil } }

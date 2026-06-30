@@ -210,6 +210,43 @@ final class MixerStore: ObservableObject {
         return outputs.filter { ids.contains($0.id) }
     }
 
+    // MARK: - Live meters
+
+    /// Live level for one source, combining every route or tap it feeds. Device
+    /// routes are keyed by connection id in AudioRouter; app taps are keyed by
+    /// "bundleID|outputUID" in AppRedirectEngine.
+    func meterReading(for source: InputSource) -> MeterReading {
+        switch source.kind {
+        case .device:
+            let ids = connections.filter { $0.sourceID == source.id }.map { $0.id }
+            return AudioMeter.combine(ids.compactMap { router.levels[$0] })
+        case .app(let bundleID):
+            if source.followsSystemOutput, let def = systemAudio.defaultOutputUID {
+                return appRedirectEngine.levels["\(bundleID)|\(def)"] ?? .silent
+            }
+            let outs = connectedOutputs(for: source.id).map { $0.uid }
+            let keys = outs.map { "\(bundleID)|\($0)" }
+            return AudioMeter.combine(keys.compactMap { appRedirectEngine.levels[$0] })
+        }
+    }
+
+    /// Live level for one output, combining every source feeding it.
+    func meterReading(for output: OutputTarget) -> MeterReading {
+        var readings: [MeterReading] = []
+        for conn in connections where conn.outputID == output.id {
+            if let r = router.levels[conn.id] { readings.append(r) }
+        }
+        for source in inputs {
+            guard case .app(let bundleID) = source.kind else { continue }
+            let connectedToThis = source.followsSystemOutput
+                ? systemAudio.defaultOutputUID == output.uid
+                : connections.contains { $0.sourceID == source.id && $0.outputID == output.id }
+            guard connectedToThis else { continue }
+            if let r = appRedirectEngine.levels["\(bundleID)|\(output.uid)"] { readings.append(r) }
+        }
+        return AudioMeter.combine(readings)
+    }
+
     // MARK: - Reordering (drag)
 
     func moveInput(id draggedID: UUID, before targetID: UUID) {
@@ -285,6 +322,7 @@ final class MixerStore: ObservableObject {
     func applyEQPreset(_ gains: [Double], for sourceID: UUID) {
         updateInput(sourceID) { $0.eq = gains; $0.eqEnabled = true }
     }
+    func toggleMagicBoost(for sourceID: UUID) { updateInput(sourceID) { $0.magicBoost.toggle() } }
 
     // MARK: - Per-card controls
 
@@ -354,12 +392,12 @@ final class MixerStore: ObservableObject {
             case .device(let uid):
                 routes.append(Route(id: routeID, inputUID: "input:\(uid)", outputUID: "output:\(outputUID)",
                                     volume: Double(gain), isMuted: gain == 0, boost: source.boost,
-                                    eqEnabled: source.eqEnabled, eq: source.eq))
+                                    eqEnabled: source.eqEnabled, eq: source.eq, magicBoost: source.magicBoost))
             case .app(let bundleID):
                 guard let app = appByBundle[bundleID] else { return }
                 taps.append(AppTapRequest(bundleID: bundleID, processObject: app.processObject,
                                           outputUID: outputUID, volume: gain, boost: source.boost,
-                                          eqEnabled: source.eqEnabled, eq: source.eq))
+                                          eqEnabled: source.eqEnabled, eq: source.eq, magicBoost: source.magicBoost))
             }
         }
 

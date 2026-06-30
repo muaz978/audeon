@@ -157,24 +157,39 @@ The canvas (inputs, outputs, connections, and colors) is stored in
 
 ## Roadmap
 
-Done so far: device routing, per-app volume and redirect, system default device
-pickers, per-device volume and sample rate, a menu bar control, and a settings
-menu.
+Done so far: a Mixline style routing canvas (add input/output, click or drag to
+connect, many to one and one to many), per-source and per-output volume and
+mute, a 10 band EQ and 1x-4x volume overdrive per source, Magic Boost (a
+dynamics compressor that lifts quiet audio and tames peaks), live level meters
+on cards and in the menu bar, system default device pickers, per-device volume
+and sample rate, scenes (save and recall a whole routing setup), follow system
+output, a menu bar quick controls popover, a first run permissions screen, and
+sleep/wake and device hot-plug resilience.
 
-Still planned, in rough priority order. These are real subsystems, not faked
-placeholders, which is why they are staged.
+Known limitation: routing between two different physical devices (for example
+a USB microphone to a separate set of speakers) uses a private aggregate
+device combining the two, the same technique proven reliable for per-app
+capture. In testing this surfaced a sample rate and channel count validation
+issue in some configurations, which fails safely (a banner appears, no crash,
+no audio glitch) but does not yet guarantee sound reaches the output. Routing
+where the input and output are the same device, and all per-app capture and
+redirect, are unaffected. This needs real-world listening verification, which
+is tracked as the top priority below.
 
-1. Per-app and per-device EQ and audio effects (a 10 band EQ and Audio Unit
-   hosting). The path is to run the tapped audio through an AVAudioEngine graph
-   with `AVAudioUnitEQ` and `AVAudioUnit` effects instead of the plain gain
-   passthrough.
-2. Volume boost above 100 percent, which is a software gain greater than one in
-   the same passthrough.
-3. Output Groups, so one app can play to several devices at once.
-4. Present Audeon as a virtual device for OBS, Streamlabs, and Discord, via an
-   AudioServerPlugIn driver or by supporting the open source BlackHole driver.
-5. Super volume keys, so the media keys control the focused app or device.
-6. Per-device nickname and custom icon.
+Still planned, in rough priority order:
+
+1. Verify and, if needed, rework cross-device hardware routing using a lower
+   level technique (a direct I/O proc on the aggregate device, the same
+   primitive already used for per-app capture) instead of binding
+   AVAudioEngine's shared input/output unit to the aggregate.
+2. Output Groups, so one app can play to several devices at once.
+3. Present Audeon as a virtual device for OBS, Streamlabs, and Discord, via an
+   AudioServerPlugIn driver or by supporting the open source BlackHole driver
+   (the onboarding screen already detects BlackHole if installed).
+4. Recording a mix to a file, reusing the existing tap pipeline.
+5. Super volume keys and a global show or hide shortcut, both opt in and both
+   needing Accessibility access.
+6. Per-device custom icon, and broader VoiceOver labeling.
 
 ## License
 

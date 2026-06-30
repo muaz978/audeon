@@ -115,9 +115,10 @@ private struct QuickControlsView: View {
     private let nameW: CGFloat = 188
     private let volW: CGFloat = 176
     private let boostW: CGFloat = 46
+    private let magicW: CGFloat = 28
     private let devW: CGFloat = 168
     private let fxW: CGFloat = 24
-    private var fullWidth: CGFloat { nameW + volW + boostW + devW + fxW + 4 * 8 + 28 }
+    private var fullWidth: CGFloat { nameW + volW + boostW + magicW + devW + fxW + 5 * 8 + 28 }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -236,6 +237,7 @@ private struct QuickControlsView: View {
 
             if !compact {
                 Color.clear.frame(width: boostW, height: 1)   // no boost for system
+                Color.clear.frame(width: magicW, height: 1)   // no magic boost for system
                 deviceMenu(currentUID: currentUID, devices: devices, onSelect: onSelect)
                     .frame(width: devW, alignment: .trailing)
                 Color.clear.frame(width: fxW, height: 1)      // no fx for system
@@ -288,12 +290,15 @@ private struct QuickControlsView: View {
                 }.frame(width: compact ? nil : nameW, alignment: .leading)
                 if compact { Spacer(minLength: 4) }
 
-                HStack(spacing: 6) {
-                    muteButton2(isMuted: source.isMuted) { store.updateInput(source.id) { $0.isMuted.toggle() } }
-                    Slider(value: Binding(get: { source.volume },
-                                          set: { v in store.updateInput(source.id) { $0.volume = v } }), in: 0...1)
-                        .controlSize(.small).tint(.green)
-                    percent(source.volume)
+                VStack(spacing: 2) {
+                    HStack(spacing: 6) {
+                        muteButton2(isMuted: source.isMuted) { store.updateInput(source.id) { $0.isMuted.toggle() } }
+                        Slider(value: Binding(get: { source.volume },
+                                              set: { v in store.updateInput(source.id) { $0.volume = v } }), in: 0...1)
+                            .controlSize(.small).tint(.green)
+                        percent(source.volume)
+                    }
+                    MiniMeterBar(reading: store.meterReading(for: source)).padding(.leading, 22)
                 }.frame(width: compact ? 150 : volW)
 
                 if !compact {
@@ -301,6 +306,13 @@ private struct QuickControlsView: View {
                         .buttonStyle(.bordered).controlSize(.small)
                         .tint(source.boost > 1 ? color : .gray)
                         .frame(width: boostW)
+                    Button { store.toggleMagicBoost(for: source.id) } label: {
+                        Image(systemName: "wand.and.stars")
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(source.magicBoost ? color : .secondary)
+                    .frame(width: magicW)
+                    .help("Magic Boost: lift quiet audio and tame loud peaks")
                     redirectMenu(source).frame(width: devW, alignment: .trailing)
                     Button { toggle(source.id) } label: {
                         Image(systemName: isOpen ? "chevron.up" : "chevron.right").font(.system(size: 11))
@@ -352,6 +364,7 @@ private struct QuickControlsView: View {
             Color.clear.frame(width: nameW, height: 1)
             Text("Volume").frame(width: volW)
             Text("Boost").frame(width: boostW)
+            Color.clear.frame(width: magicW, height: 1)
             Text(deviceTitle).frame(width: devW)
             Color.clear.frame(width: fxW, height: 1)
         }

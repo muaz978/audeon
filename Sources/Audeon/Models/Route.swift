@@ -32,6 +32,7 @@ struct Route: Identifiable, Equatable {
     var boost: Double        // 1...4
     var eqEnabled: Bool
     var eq: [Double]         // band gains in dB
+    var magicBoost: Bool     // dynamics compressor
 
     /// Raw device uids for engine wiring, stripped of the direction prefix.
     var inputDeviceUID: String { AudioEndpoint.uid(fromKey: inputUID) }
@@ -44,7 +45,8 @@ struct Route: Identifiable, Equatable {
          isMuted: Bool = false,
          boost: Double = 1.0,
          eqEnabled: Bool = false,
-         eq: [Double] = AudioEQ.flat) {
+         eq: [Double] = AudioEQ.flat,
+         magicBoost: Bool = false) {
         self.id = id
         self.inputUID = inputUID
         self.outputUID = outputUID
@@ -53,5 +55,6 @@ struct Route: Identifiable, Equatable {
         self.boost = boost
         self.eqEnabled = eqEnabled
         self.eq = eq
+        self.magicBoost = magicBoost
     }
 }

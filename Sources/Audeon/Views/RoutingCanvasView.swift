@@ -19,6 +19,9 @@ struct RoutingCanvasView: View {
     var body: some View {
         VStack(spacing: 0) {
             addBar
+            if let err = store.router.lastError ?? store.appRedirectEngine.lastError {
+                errorBanner(err)
+            }
             ZStack {
                 CableLayer()
                 HStack(alignment: .top, spacing: 0) {
@@ -35,6 +38,16 @@ struct RoutingCanvasView: View {
             .animation(.easeInOut(duration: 0.2), value: store.connections)
             .animation(.easeInOut(duration: 0.2), value: store.hideInactiveApps)
         }
+    }
+
+    private func errorBanner(_ message: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
+            Text(message).font(.caption)
+            Spacer()
+        }
+        .padding(.horizontal, 18).padding(.vertical, 6)
+        .background(Color.yellow.opacity(0.12))
     }
 
     // MARK: - Columns
@@ -343,7 +356,7 @@ private struct InputCard: View {
             Button { withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() } } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 14))
-                    .foregroundStyle(source.eqEnabled || source.boost > 1 ? color : .secondary)
+                    .foregroundStyle(source.eqEnabled || source.boost > 1 || source.magicBoost ? color : .secondary)
             }.buttonStyle(.borderless).help("EQ and boost")
             colorMenu
             Button { withAnimation { store.removeInput(source.id) } } label: {
@@ -381,15 +394,18 @@ private struct InputCard: View {
     }
 
     private var volumeRow: some View {
-        HStack(spacing: 10) {
-            Button { store.updateInput(source.id) { $0.isMuted.toggle() } } label: {
-                Image(systemName: source.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                    .font(.system(size: 15))
-                    .foregroundStyle(source.isMuted ? .red : .primary)
-            }.buttonStyle(.borderless).help(source.isMuted ? "Unmute" : "Mute")
-            Slider(value: Binding(get: { source.volume }, set: { v in store.updateInput(source.id) { $0.volume = v } }), in: 0...1)
-            Text("\(Int(source.volume * 100))%").font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
+        VStack(spacing: 4) {
+            HStack(spacing: 10) {
+                Button { store.updateInput(source.id) { $0.isMuted.toggle() } } label: {
+                    Image(systemName: source.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(source.isMuted ? .red : .primary)
+                }.buttonStyle(.borderless).help(source.isMuted ? "Unmute" : "Mute")
+                Slider(value: Binding(get: { source.volume }, set: { v in store.updateInput(source.id) { $0.volume = v } }), in: 0...1)
+                Text("\(Int(source.volume * 100))%").font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
+            }
+            MiniMeterBar(reading: store.meterReading(for: source))
         }
     }
 
@@ -400,6 +416,33 @@ private struct InputCard: View {
             }
         } label: { Image(systemName: "paintpalette").font(.system(size: 14)).foregroundStyle(.secondary) }
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Color")
+    }
+}
+
+/// A thin horizontal level meter: green into the working range, amber then red
+/// as it nears full scale, with a small clip dot.
+struct MiniMeterBar: View {
+    let reading: MeterReading
+
+    private var barColor: Color {
+        if reading.peakDB > -3 { return .red }
+        if reading.peakDB > -12 { return .orange }
+        return .green
+    }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2).fill(Color.primary.opacity(0.08))
+                    RoundedRectangle(cornerRadius: 2).fill(barColor)
+                        .frame(width: max(2, geo.size.width * CGFloat(reading.level)))
+                }
+            }
+            .frame(height: 4)
+            Circle().fill(reading.clip ? Color.red : Color.primary.opacity(0.12)).frame(width: 5, height: 5)
+        }
+        .animation(.linear(duration: 0.08), value: reading.level)
     }
 }
 
@@ -420,6 +463,13 @@ private struct ProcessingPanel: View {
                         .controlSize(.small)
                         .tint(Int(source.boost) == n ? store.color(forPin: source.pinKey).color : .gray)
                 }
+                Spacer()
+                Button { store.toggleMagicBoost(for: source.id) } label: {
+                    Label("Magic Boost", systemImage: "wand.and.stars")
+                }
+                .buttonStyle(.bordered).controlSize(.small)
+                .tint(source.magicBoost ? store.color(forPin: source.pinKey).color : .gray)
+                .help("Lift quiet audio and tame loud peaks")
             }
             HStack {
                 Toggle("10-Band EQ", isOn: Binding(get: { source.eqEnabled }, set: { _ in store.toggleEQ(for: source.id) }))
@@ -485,15 +535,18 @@ private struct OutputCard: View {
                         Image(systemName: "xmark.circle.fill").font(.system(size: 16)).foregroundStyle(.secondary)
                     }.buttonStyle(.borderless).help("Remove output")
                 }
-                HStack(spacing: 10) {
-                    Button { store.updateOutput(output.id) { $0.isMuted.toggle() } } label: {
-                        Image(systemName: output.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                            .font(.system(size: 15))
-                            .foregroundStyle(output.isMuted ? .red : .primary)
-                    }.buttonStyle(.borderless)
-                    Slider(value: Binding(get: { output.volume }, set: { v in store.updateOutput(output.id) { $0.volume = v } }), in: 0...1)
-                    Text("\(Int(output.volume * 100))%").font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
+                VStack(spacing: 4) {
+                    HStack(spacing: 10) {
+                        Button { store.updateOutput(output.id) { $0.isMuted.toggle() } } label: {
+                            Image(systemName: output.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                                .font(.system(size: 15))
+                                .foregroundStyle(output.isMuted ? .red : .primary)
+                        }.buttonStyle(.borderless)
+                        Slider(value: Binding(get: { output.volume }, set: { v in store.updateOutput(output.id) { $0.volume = v } }), in: 0...1)
+                        Text("\(Int(output.volume * 100))%").font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
+                    }
+                    MiniMeterBar(reading: store.meterReading(for: output))
                 }
             }
             .padding(12)
