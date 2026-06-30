@@ -32,9 +32,12 @@ struct AudeonApp: App {
 
 /// Owns the menu bar status item and a popover anchored to it, built with AppKit
 /// so the popover reliably drops from the icon and observes the shared store.
+extension Notification.Name { static let audeonShowOnboarding = Notification.Name("AudeonShowOnboarding") }
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
+    private var onboardingWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         popover.behavior = .transient
@@ -50,28 +53,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.target = self
         }
 
+        // Reopen onboarding on request (from Settings).
+        NotificationCenter.default.addObserver(forName: .audeonShowOnboarding, object: nil, queue: .main) { [weak self] _ in
+            self?.showOnboarding()
+        }
+        // Rebuild the audio engines after the machine wakes from sleep.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { MixerStore.shared.reapply() }
+        }
+
         requestPermissionsOnFirstLaunch()
     }
 
     /// On first launch, request Microphone access (so the system prompt appears
-    /// right after install) and show a one-time welcome guiding the user.
+    /// right after install) and show the welcome / permissions window.
     private func requestPermissionsOnFirstLaunch() {
         if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
             AVCaptureDevice.requestAccess(for: .audio) { _ in }
         }
         guard !UserDefaults.standard.bool(forKey: "didWelcome") else { return }
         UserDefaults.standard.set(true, forKey: "didWelcome")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            let alert = NSAlert()
-            alert.messageText = "Welcome to Audeon"
-            alert.informativeText = "Audeon needs Microphone access to read your audio devices, and it captures application audio with Core Audio process taps. Please allow access when prompted.\n\nYou can review this anytime in System Settings > Privacy & Security > Microphone."
-            alert.addButton(withTitle: "Open Privacy Settings")
-            alert.addButton(withTitle: "Later")
-            if alert.runModal() == .alertFirstButtonReturn,
-               let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
-                NSWorkspace.shared.open(url)
-            }
-        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.showOnboarding() }
+    }
+
+    private func showOnboarding() {
+        if let win = onboardingWindow { NSApp.activate(ignoringOtherApps: true); win.makeKeyAndOrderFront(nil); return }
+        let vc = NSHostingController(rootView: OnboardingView().environmentObject(MixerStore.shared))
+        let win = NSWindow(contentViewController: vc)
+        win.title = "Welcome to Audeon"
+        win.styleMask = [.titled, .closable]
+        win.isReleasedWhenClosed = false
+        win.center()
+        onboardingWindow = win
+        NSApp.activate(ignoringOtherApps: true)
+        win.makeKeyAndOrderFront(nil)
     }
 
     @objc private func togglePopover(_ sender: Any?) {
@@ -387,12 +403,17 @@ private struct QuickControlsView: View {
 
     private func redirectMenu(_ source: InputSource) -> some View {
         let connected = store.connectedDeviceUIDs(for: source.id)
-        let label: String = connected.isEmpty ? "No Redirect"
+        let label: String = source.followsSystemOutput ? "Follows output"
+            : (connected.isEmpty ? "No Redirect"
             : (connected.count == 1 ? (store.deviceManager.endpoint(forUID: connected.first!)?.name ?? "1 device")
-                                    : "\(connected.count) devices")
+                                    : "\(connected.count) devices"))
         return Menu {
+            Button { store.toggleFollowOutput(source.id) } label: {
+                Label("Follow System Output", systemImage: source.followsSystemOutput ? "checkmark" : "")
+            }
+            Divider()
             Button { store.clearRoutes(for: source.id) } label: {
-                Label("No Redirect", systemImage: connected.isEmpty ? "checkmark" : "")
+                Label("No Redirect", systemImage: connected.isEmpty && !source.followsSystemOutput ? "checkmark" : "")
             }
             Divider()
             ForEach(store.deviceManager.outputs) { d in
@@ -400,6 +421,7 @@ private struct QuickControlsView: View {
                     Label(d.name, systemImage: connected.contains(d.uid) ? "checkmark" : "")
                 }
             }
+            .disabled(source.followsSystemOutput)
         } label: {
             HStack(spacing: 3) {
                 Image(systemName: "arrow.up.forward").font(.system(size: 9))

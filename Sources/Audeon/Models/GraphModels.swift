@@ -17,10 +17,12 @@ struct InputSource: Identifiable, Codable, Equatable {
     var eq: [Double]       // per band gain in dB, length AudioEQ.bandCount
     var displayName: String?   // remembered name so closed apps still read well
     var isFavorite: Bool       // pinned to the top of the menu bar list
+    var followsSystemOutput: Bool = false   // auto-route to the current default output
 
     init(id: UUID = UUID(), kind: SourceKind, volume: Double = 1.0, isMuted: Bool = false,
          boost: Double = 1.0, eqEnabled: Bool = false, eq: [Double] = AudioEQ.flat,
-         displayName: String? = nil, isFavorite: Bool = false) {
+         displayName: String? = nil, isFavorite: Bool = false, followsSystemOutput: Bool = false) {
+        self.followsSystemOutput = followsSystemOutput
         self.id = id
         self.kind = kind
         self.volume = volume
@@ -32,7 +34,9 @@ struct InputSource: Identifiable, Codable, Equatable {
         self.isFavorite = isFavorite
     }
 
-    enum CodingKeys: String, CodingKey { case id, kind, volume, isMuted, boost, eqEnabled, eq, displayName, isFavorite }
+    enum CodingKeys: String, CodingKey {
+        case id, kind, volume, isMuted, boost, eqEnabled, eq, displayName, isFavorite, followsSystemOutput
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -46,6 +50,7 @@ struct InputSource: Identifiable, Codable, Equatable {
         eq = stored.count == AudioEQ.bandCount ? stored : AudioEQ.flat
         displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
         isFavorite = try c.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
+        followsSystemOutput = try c.decodeIfPresent(Bool.self, forKey: .followsSystemOutput) ?? false
     }
 
     var appBundleID: String? { if case .app(let b) = kind { return b } else { return nil } }
@@ -87,5 +92,25 @@ struct Connection: Identifiable, Codable, Equatable {
         self.id = id
         self.sourceID = sourceID
         self.outputID = outputID
+    }
+}
+
+/// A saved snapshot of the whole routing graph (Quick Configs / scenes).
+struct MixScene: Identifiable, Codable, Equatable {
+    let id: UUID
+    var name: String
+    var inputs: [InputSource]
+    var outputs: [OutputTarget]
+    var connections: [Connection]
+    var colors: [String: Int]
+
+    init(id: UUID = UUID(), name: String, inputs: [InputSource], outputs: [OutputTarget],
+         connections: [Connection], colors: [String: Int]) {
+        self.id = id
+        self.name = name
+        self.inputs = inputs
+        self.outputs = outputs
+        self.connections = connections
+        self.colors = colors
     }
 }

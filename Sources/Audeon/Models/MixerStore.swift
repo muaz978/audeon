@@ -17,6 +17,10 @@ final class MixerStore: ObservableObject {
     @Published var colors: [String: ChannelColor] = [:] { didSet { schedulePersist() } }
     /// Optional friendly names per device uid.
     @Published var deviceNicknames: [String: String] = [:] { didSet { schedulePersist() } }
+    /// Saved routing snapshots (Quick Configs / scenes).
+    @Published var scenes: [MixScene] = [] { didSet { schedulePersist() } }
+    /// Drives the "save scene" name sheet.
+    @Published var showSaveSceneSheet: Bool = false
 
     // Transient connect interaction.
     @Published var pendingSourceID: UUID?          // click a source pin, then an output pin
@@ -67,7 +71,45 @@ final class MixerStore: ObservableObject {
         // Re-apply when the running app list changes, so an app source activates
         // as soon as its process appears.
         appManager.$apps.sink { [weak self] _ in self?.applyGraph() }.store(in: &cancellables)
+        // Re-apply when the default output changes, so "follow output" and the
+        // menu bar redirects track it.
+        systemAudio.$defaultOutputUID.dropFirst().sink { [weak self] _ in self?.applyGraph() }
+            .store(in: &cancellables)
+        // Re-establish routes when devices are plugged in or removed.
+        deviceManager.$outputs.dropFirst().sink { [weak self] _ in self?.applyGraph() }
+            .store(in: &cancellables)
+        deviceManager.$inputs.dropFirst().sink { [weak self] _ in self?.applyGraph() }
+            .store(in: &cancellables)
     }
+
+    /// Full restart of the audio engines, used after sleep/wake.
+    func reapply() {
+        router.stopAll()
+        appRedirectEngine.stopAll()
+        deviceManager.refresh()
+        appManager.refresh()
+        applyGraph()
+    }
+
+    // MARK: - Scenes (Quick Configs)
+
+    func saveScene(named name: String) {
+        let n = name.trimmingCharacters(in: .whitespaces)
+        scenes.append(MixScene(name: n.isEmpty ? "Scene \(scenes.count + 1)" : n,
+                            inputs: inputs, outputs: outputs, connections: connections,
+                            colors: colors.mapValues { $0.rawValue }))
+    }
+
+    func loadScene(_ id: UUID) {
+        guard let s = scenes.first(where: { $0.id == id }) else { return }
+        colors = s.colors.compactMapValues { ChannelColor(rawValue: $0) }
+        outputs = s.outputs
+        inputs = s.inputs
+        connections = s.connections
+    }
+
+    func deleteScene(_ id: UUID) { scenes.removeAll { $0.id == id } }
+    func requestSaveScene() { showSaveSceneSheet = true }
 
     // MARK: - Adding and removing cards
 
@@ -225,6 +267,7 @@ final class MixerStore: ObservableObject {
     }
 
     func toggleFavorite(_ sourceID: UUID) { updateInput(sourceID) { $0.isFavorite.toggle() } }
+    func toggleFollowOutput(_ sourceID: UUID) { updateInput(sourceID) { $0.followsSystemOutput.toggle() } }
 
     /// Inputs with favorites first (used by the menu bar list).
     var inputsFavoritesFirst: [InputSource] {
@@ -305,34 +348,31 @@ final class MixerStore: ObservableObject {
         var taps: [AppTapRequest] = []
         let appByBundle = Dictionary(uniqueKeysWithValues: appManager.apps.map { ($0.bundleID, $0) })
 
-        for conn in connections {
-            guard let source = inputs.first(where: { $0.id == conn.sourceID }),
-                  let output = outputs.first(where: { $0.id == conn.outputID }) else { continue }
-            let gain = source.effectiveGain * (output.isMuted ? 0 : Float(output.volume))
-
+        func addTarget(_ source: InputSource, outputUID: String, outputVolume: Float, routeID: UUID) {
+            let gain = source.effectiveGain * outputVolume
             switch source.kind {
             case .device(let uid):
-                routes.append(Route(
-                    id: conn.id,
-                    inputUID: "input:\(uid)",
-                    outputUID: "output:\(output.uid)",
-                    volume: Double(gain),
-                    isMuted: gain == 0,
-                    boost: source.boost,
-                    eqEnabled: source.eqEnabled,
-                    eq: source.eq
-                ))
+                routes.append(Route(id: routeID, inputUID: "input:\(uid)", outputUID: "output:\(outputUID)",
+                                    volume: Double(gain), isMuted: gain == 0, boost: source.boost,
+                                    eqEnabled: source.eqEnabled, eq: source.eq))
             case .app(let bundleID):
-                guard let app = appByBundle[bundleID] else { continue }
-                taps.append(AppTapRequest(
-                    bundleID: bundleID,
-                    processObject: app.processObject,
-                    outputUID: output.uid,
-                    volume: gain,
-                    boost: source.boost,
-                    eqEnabled: source.eqEnabled,
-                    eq: source.eq
-                ))
+                guard let app = appByBundle[bundleID] else { return }
+                taps.append(AppTapRequest(bundleID: bundleID, processObject: app.processObject,
+                                          outputUID: outputUID, volume: gain, boost: source.boost,
+                                          eqEnabled: source.eqEnabled, eq: source.eq))
+            }
+        }
+
+        for source in inputs {
+            if source.followsSystemOutput, let def = systemAudio.defaultOutputUID {
+                // Auto-route to whatever the system default output currently is.
+                addTarget(source, outputUID: def, outputVolume: 1, routeID: source.id)
+            } else {
+                for conn in connections where conn.sourceID == source.id {
+                    guard let output = outputs.first(where: { $0.id == conn.outputID }) else { continue }
+                    addTarget(source, outputUID: output.uid,
+                              outputVolume: output.isMuted ? 0 : Float(output.volume), routeID: conn.id)
+                }
             }
         }
         router.apply(routes: routes)
@@ -375,6 +415,7 @@ final class MixerStore: ObservableObject {
         var connections: [Connection]
         var colors: [String: Int]
         var deviceNicknames: [String: String]?
+        var scenes: [MixScene]?
     }
 
     private func schedulePersist() {
@@ -388,7 +429,8 @@ final class MixerStore: ObservableObject {
         let payload = Persisted(
             inputs: inputs, outputs: outputs, connections: connections,
             colors: colors.mapValues { $0.rawValue },
-            deviceNicknames: deviceNicknames
+            deviceNicknames: deviceNicknames,
+            scenes: scenes
         )
         do {
             let data = try JSONEncoder().encode(payload)
@@ -408,6 +450,7 @@ final class MixerStore: ObservableObject {
         connections = payload.connections
         colors = payload.colors.compactMapValues { ChannelColor(rawValue: $0) }
         deviceNicknames = payload.deviceNicknames ?? [:]
+        scenes = payload.scenes ?? []
     }
 
     private static func defaultSaveURL() -> URL {

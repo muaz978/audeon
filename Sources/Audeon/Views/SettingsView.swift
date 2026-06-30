@@ -136,6 +136,11 @@ private struct GeneralTab: View {
                         catch { launchAtLogin = SMAppService.mainApp.status == .enabled }
                     }
             }
+            Section("Permissions") {
+                Button("Show Welcome & Permissions") {
+                    NotificationCenter.default.post(name: .audeonShowOnboarding, object: nil)
+                }
+            }
             Section("Software update") {
                 Text("Audeon is distributed on GitHub. New versions appear on the Releases page.")
                     .font(.caption).foregroundStyle(.secondary)
