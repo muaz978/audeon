@@ -80,7 +80,7 @@ final class MixerStore: ObservableObject {
     /// automatically when the app reopens or the device returns.
     func isActive(_ source: InputSource) -> Bool {
         switch source.kind {
-        case .app(let b): return appManager.apps.contains { $0.bundleID == b }
+        case .app(let b): return appManager.runningBundleIDs.contains(b)
         case .device(let u): return deviceManager.deviceID(forUID: u) != nil
         }
     }

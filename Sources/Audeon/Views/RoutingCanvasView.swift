@@ -41,21 +41,28 @@ struct RoutingCanvasView: View {
 
     private var inputsColumn: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Text("INPUTS").font(.subheadline.bold()).foregroundStyle(.secondary)
-                    Spacer()
-                    Button {
-                        withAnimation { store.hideInactiveApps.toggle() }
-                    } label: {
-                        Label(store.hideInactiveApps ? "Show all" : "Hide inactive",
-                              systemImage: store.hideInactiveApps ? "eye.slash.fill" : "eye")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("Temporarily hide inputs whose app is closed or device is unplugged")
+            VStack(alignment: .leading, spacing: 12) {
+                Text("INPUTS").font(.subheadline.bold()).foregroundStyle(.secondary)
+
+                // Filter on its own row, aligned with the cards below it.
+                Button {
+                    withAnimation { store.hideInactiveApps.toggle() }
+                } label: {
+                    Label(store.hideInactiveApps ? "Showing active only" : "Hide inactive",
+                          systemImage: store.hideInactiveApps ? "line.3.horizontal.decrease.circle.fill"
+                                                             : "line.3.horizontal.decrease.circle")
+                        .font(.callout)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 6)
+                        .padding(.horizontal, 10)
                 }
+                .buttonStyle(.plain)
+                .background(RoundedRectangle(cornerRadius: 9)
+                    .fill(store.hideInactiveApps ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.06)))
+                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.primary.opacity(0.1)))
+                .frame(width: cardWidth, alignment: .leading)
+                .help("Temporarily hide inputs whose app is closed or device is unplugged")
+
                 ForEach(store.visibleInputs) { source in
                     InputCard(source: source)
                         .transition(.scale.combined(with: .opacity))

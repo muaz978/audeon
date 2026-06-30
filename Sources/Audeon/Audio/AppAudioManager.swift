@@ -28,16 +28,21 @@ struct AudioApp: Identifiable, Equatable {
 /// process object list (macOS 14.2+).
 final class AppAudioManager: ObservableObject {
     @Published private(set) var apps: [AudioApp] = []
+    /// Bundle ids of all regular apps currently running, regardless of whether
+    /// they have produced audio yet. Drives the active state of input cards.
+    @Published private(set) var runningBundleIDs: Set<String> = []
 
     private var listenerBlock: AudioObjectPropertyListenerBlock?
     private var timer: Timer?
 
+    private var workspaceObservers: [NSObjectProtocol] = []
+
     init() {
         refresh()
         installListener()
-        // Apps come and go, and not every change posts a notification, so poll
-        // gently as a backstop.
-        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+        installWorkspaceObservers()
+        // Backstop poll in case a notification is missed.
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             self?.refresh()
         }
     }
@@ -45,6 +50,23 @@ final class AppAudioManager: ObservableObject {
     deinit {
         timer?.invalidate()
         removeListener()
+        workspaceObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
+    }
+
+    /// React immediately when any app launches or quits, so a reopened input
+    /// reactivates and reconnects without waiting for the poll.
+    private func installWorkspaceObservers() {
+        let nc = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didLaunchApplicationNotification,
+                     NSWorkspace.didTerminateApplicationNotification,
+                     NSWorkspace.didActivateApplicationNotification] {
+            let token = nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                // Give CoreAudio a moment to register the new process, then refresh.
+                self?.refresh()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { self?.refresh() }
+            }
+            workspaceObservers.append(token)
+        }
     }
 
     func refresh() {
@@ -65,8 +87,12 @@ final class AppAudioManager: ObservableObject {
         }
 
         let sorted = result.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        let running = Set(NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+            .compactMap { $0.bundleIdentifier })
         DispatchQueue.main.async {
             if self.apps != sorted { self.apps = sorted }
+            if self.runningBundleIDs != running { self.runningBundleIDs = running }
         }
     }
 
