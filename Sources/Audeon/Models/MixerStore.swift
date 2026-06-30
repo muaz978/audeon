@@ -2,37 +2,23 @@ import Foundation
 import SwiftUI
 import Combine
 
-/// Which workspace the main window is showing.
-enum AppMode: String, CaseIterable, Identifiable {
-    case apps = "Apps & System"
-    case routing = "Device Routing"
-    var id: String { rawValue }
-}
-
-/// Top-level app state: the routing matrix, channel colors, presets, and
-/// persistence. Owns the AudioRouter and pushes changes into it.
+/// Top-level app state for the Mixline-style routing canvas: added input sources
+/// (devices or apps), added output devices, and the cables between them. Owns the
+/// audio engines and keeps them in sync with the graph.
 @MainActor
 final class MixerStore: ObservableObject {
-    @Published var routes: [Route] = [] { didSet { schedulePersist(); applyToEngine() } }
+    @Published var inputs: [InputSource] = [] { didSet { schedulePersist(); applyGraph() } }
+    @Published var outputs: [OutputTarget] = [] { didSet { schedulePersist(); applyGraph() } }
+    @Published var connections: [Connection] = [] { didSet { schedulePersist(); applyGraph() } }
     @Published var colors: [String: ChannelColor] = [:] { didSet { schedulePersist() } }
-    @Published var presets: [Preset] = [] { didSet { schedulePersist() } }
 
-    /// Per-application volume and redirect settings, keyed by bundle id.
-    @Published var appRedirects: [String: AppRedirect] = [:] { didSet { schedulePersist(); applyApps() } }
+    // Transient connect interaction.
+    @Published var pendingSourceID: UUID?          // click a source pin, then an output pin
+    @Published var dragSourceID: UUID?             // drag in progress from this source
+    @Published var dragPoint: CGPoint?             // live drag location, canvas space
+    @Published var pinFrames: [String: CGPoint] = [:]   // pinKey -> center in canvas space
 
-    /// The current main-window workspace.
-    @Published var mode: AppMode = .apps
-
-    /// The input endpoint currently waiting to be connected (click-to-connect).
-    @Published var linkingFromInput: String?
-
-    /// Drives the "save preset" sheet from the menu / shortcut.
-    @Published var showSavePresetSheet: Bool = false
-
-    /// Drives the Settings sheet.
     @Published var showSettings: Bool = false
-
-    func requestSavePreset() { showSavePresetSheet = true }
 
     let deviceManager: AudioDeviceManager
     let router: AudioRouter
@@ -53,11 +39,8 @@ final class MixerStore: ObservableObject {
         self.appRedirectEngine = AppRedirectEngine(deviceManager: dm)
         self.saveURL = Self.defaultSaveURL()
         load()
-        applyToEngine()
-        applyApps()
+        applyGraph()
 
-        // Views observe this store, but live data lives in these nested objects.
-        // Forward their change notifications so the UI refreshes.
         for child in [dm.objectWillChange.eraseToAnyPublisher(),
                       router.objectWillChange.eraseToAnyPublisher(),
                       systemAudio.objectWillChange.eraseToAnyPublisher(),
@@ -66,139 +49,175 @@ final class MixerStore: ObservableObject {
             child.sink { [weak self] _ in self?.objectWillChange.send() }
                 .store(in: &cancellables)
         }
-
-        // Re-apply per-app redirects when the app list or default output changes,
-        // so a stored redirect activates as soon as its app appears.
-        appManager.$apps
-            .sink { [weak self] _ in self?.applyApps() }
-            .store(in: &cancellables)
-        systemAudio.$defaultOutputUID
-            .sink { [weak self] _ in self?.applyApps() }
-            .store(in: &cancellables)
+        // Re-apply when the running app list changes, so an app source activates
+        // as soon as its process appears.
+        appManager.$apps.sink { [weak self] _ in self?.applyGraph() }.store(in: &cancellables)
     }
 
-    // MARK: - Routing intents
+    // MARK: - Adding and removing cards
 
-    func color(for uid: String) -> ChannelColor {
-        colors[uid] ?? Self.defaultColor(for: uid)
+    func addDeviceInput(uid: String) {
+        guard !inputs.contains(where: { $0.kind == .device(uid) }) else { return }
+        inputs.append(InputSource(kind: .device(uid)))
     }
 
-    func setColor(_ color: ChannelColor, for uid: String) {
-        colors[uid] = color
+    func addAppInput(bundleID: String) {
+        guard !inputs.contains(where: { $0.kind == .app(bundleID) }) else { return }
+        inputs.append(InputSource(kind: .app(bundleID)))
     }
 
-    /// Begin or complete a click-to-connect gesture from an input dot.
-    func beginLink(fromInput uid: String) {
-        linkingFromInput = (linkingFromInput == uid) ? nil : uid
+    func removeInput(_ id: UUID) {
+        inputs.removeAll { $0.id == id }
+        connections.removeAll { $0.sourceID == id }
     }
 
-    /// Complete a link to an output, if one is in progress.
-    func completeLink(toOutput uid: String) {
-        guard let inputUID = linkingFromInput else { return }
-        linkingFromInput = nil
-        addRoute(inputUID: inputUID, outputUID: uid)
+    func addOutput(uid: String) {
+        guard !outputs.contains(where: { $0.uid == uid }) else { return }
+        outputs.append(OutputTarget(uid: uid))
     }
 
-    func addRoute(inputUID: String, outputUID: String) {
-        // Avoid duplicate edges.
-        guard !routes.contains(where: { $0.inputUID == inputUID && $0.outputUID == outputUID }) else { return }
-        routes.append(Route(inputUID: inputUID, outputUID: outputUID))
+    func removeOutput(_ id: UUID) {
+        outputs.removeAll { $0.id == id }
+        connections.removeAll { $0.outputID == id }
     }
 
-    func removeRoute(_ id: UUID) {
-        routes.removeAll { $0.id == id }
+    // MARK: - Connections
+
+    func isConnected(sourceID: UUID, outputID: UUID) -> Bool {
+        connections.contains { $0.sourceID == sourceID && $0.outputID == outputID }
     }
 
-    func updateRoute(_ id: UUID, _ mutate: (inout Route) -> Void) {
-        guard let idx = routes.firstIndex(where: { $0.id == id }) else { return }
-        mutate(&routes[idx])
+    func connect(sourceID: UUID, outputID: UUID) {
+        guard !isConnected(sourceID: sourceID, outputID: outputID) else { return }
+        connections.append(Connection(sourceID: sourceID, outputID: outputID))
     }
 
-    func routes(forInput uid: String) -> [Route] { routes.filter { $0.inputUID == uid } }
-    func routes(forOutput uid: String) -> [Route] { routes.filter { $0.outputUID == uid } }
+    func disconnect(_ id: UUID) { connections.removeAll { $0.id == id } }
 
-    // MARK: - Master controls
+    // MARK: - Per-card controls
 
-    var anySolo: Bool { routes.contains { $0.isSoloed && !$0.isMuted } }
-    var allMuted: Bool { !routes.isEmpty && routes.allSatisfy { $0.isMuted } }
-
-    func toggleMute(_ id: UUID) { updateRoute(id) { $0.isMuted.toggle() } }
-
-    func toggleSolo(_ id: UUID) { updateRoute(id) { $0.isSoloed.toggle() } }
-
-    func muteAll() { for i in routes.indices { routes[i].isMuted = true } }
-
-    func unmuteAll() { for i in routes.indices { routes[i].isMuted = false } }
-
-    func clearSolo() { for i in routes.indices { routes[i].isSoloed = false } }
-
-    /// One master toggle for the menu bar: mute everything, or restore.
-    func toggleMuteAll() { allMuted ? unmuteAll() : muteAll() }
-
-    // MARK: - Presets
-
-    func saveCurrentAsPreset(named name: String) {
-        let colorDict = colors.mapValues { $0.rawValue }
-        presets.append(Preset(name: name, routes: routes, colors: colorDict))
+    func updateInput(_ id: UUID, _ mutate: (inout InputSource) -> Void) {
+        guard let i = inputs.firstIndex(where: { $0.id == id }) else { return }
+        mutate(&inputs[i])
+    }
+    func updateOutput(_ id: UUID, _ mutate: (inout OutputTarget) -> Void) {
+        guard let i = outputs.firstIndex(where: { $0.id == id }) else { return }
+        mutate(&outputs[i])
     }
 
-    func loadPreset(_ preset: Preset) {
-        colors = preset.colors.compactMapValues { ChannelColor(rawValue: $0) }
-        routes = preset.routes
+    // MARK: - Colors
+
+    func color(forPin key: String) -> ChannelColor {
+        colors[key] ?? Self.defaultColor(for: key)
+    }
+    func setColor(_ c: ChannelColor, forPin key: String) { colors[key] = c }
+
+    // MARK: - Pin geometry and drag connect
+
+    func setPinFrame(_ key: String, _ point: CGPoint) {
+        if pinFrames[key] != point { pinFrames[key] = point }
     }
 
-    func deletePreset(_ id: UUID) {
-        presets.removeAll { $0.id == id }
-    }
-
-    // MARK: - Per-app controls
-
-    func redirect(for bundleID: String) -> AppRedirect {
-        appRedirects[bundleID] ?? AppRedirect(bundleID: bundleID)
-    }
-
-    func setAppVolume(_ volume: Double, for bundleID: String) {
-        var r = redirect(for: bundleID)
-        r.volume = max(0, min(1, volume))
-        store(r)
-    }
-
-    /// Pass nil to follow the system default output ("No Redirect").
-    func setAppOutput(_ uid: String?, for bundleID: String) {
-        var r = redirect(for: bundleID)
-        r.outputUID = uid
-        store(r)
-    }
-
-    private func store(_ r: AppRedirect) {
-        if r.outputUID == nil && r.volume >= 0.999 {
-            appRedirects[r.bundleID] = nil   // back to default, no interception
-        } else {
-            appRedirects[r.bundleID] = r
+    /// The output card whose pin is nearest the point, within a hit radius.
+    func nearestOutput(to point: CGPoint, within radius: CGFloat = 48) -> UUID? {
+        var best: (id: UUID, d: CGFloat)?
+        for out in outputs {
+            guard let p = pinFrames[out.pinKey] else { continue }
+            let d = hypot(p.x - point.x, p.y - point.y)
+            if d <= radius, best == nil || d < best!.d { best = (out.id, d) }
         }
+        return best?.id
+    }
+
+    func handleSourcePinTap(_ sourceID: UUID) {
+        pendingSourceID = (pendingSourceID == sourceID) ? nil : sourceID
+    }
+
+    func handleOutputPinTap(_ outputID: UUID) {
+        if let s = pendingSourceID {
+            connect(sourceID: s, outputID: outputID)
+            pendingSourceID = nil
+        }
+    }
+
+    func endDrag(at point: CGPoint, from sourceID: UUID) {
+        if let outID = nearestOutput(to: point) {
+            connect(sourceID: sourceID, outputID: outID)
+        }
+        dragSourceID = nil
+        dragPoint = nil
     }
 
     // MARK: - Engine
 
-    private func applyToEngine() {
+    private func applyGraph() {
+        // Device sources drive the AVAudioEngine router; app sources drive taps.
+        var routes: [Route] = []
+        var taps: [AppTapRequest] = []
+        let appByBundle = Dictionary(uniqueKeysWithValues: appManager.apps.map { ($0.bundleID, $0) })
+
+        for conn in connections {
+            guard let source = inputs.first(where: { $0.id == conn.sourceID }),
+                  let output = outputs.first(where: { $0.id == conn.outputID }) else { continue }
+            let gain = source.effectiveGain * (output.isMuted ? 0 : Float(output.volume))
+
+            switch source.kind {
+            case .device(let uid):
+                routes.append(Route(
+                    id: conn.id,
+                    inputUID: "input:\(uid)",
+                    outputUID: "output:\(output.uid)",
+                    volume: Double(gain),
+                    isMuted: gain == 0
+                ))
+            case .app(let bundleID):
+                guard let app = appByBundle[bundleID] else { continue }
+                taps.append(AppTapRequest(
+                    bundleID: bundleID,
+                    processObject: app.processObject,
+                    outputUID: output.uid,
+                    volume: gain
+                ))
+            }
+        }
         router.apply(routes: routes)
+        appRedirectEngine.apply(taps)
     }
 
-    private func applyApps() {
-        appRedirectEngine.apply(
-            redirects: Array(appRedirects.values),
-            apps: appManager.apps,
-            defaultOutputUID: systemAudio.defaultOutputUID
-        )
+    // MARK: - Display helpers
+
+    func title(for source: InputSource) -> String {
+        switch source.kind {
+        case .device(let uid): return deviceManager.endpoint(forUID: uid)?.name ?? "Device"
+        case .app(let bundleID): return appManager.apps.first { $0.bundleID == bundleID }?.name ?? bundleID
+        }
+    }
+
+    func subtitle(for source: InputSource) -> String {
+        switch source.kind {
+        case .device: return "Input device"
+        case .app:
+            if let uid = systemAudio.defaultOutputUID, let name = deviceManager.endpoint(forUID: uid)?.name {
+                return name
+            }
+            return "Application"
+        }
+    }
+
+    func icon(for source: InputSource) -> NSImage? {
+        if case .app(let bundleID) = source.kind {
+            return appManager.apps.first { $0.bundleID == bundleID }?.icon
+        }
+        return nil
     }
 
     // MARK: - Persistence
 
     private struct Persisted: Codable {
-        var routes: [Route]
+        var inputs: [InputSource]
+        var outputs: [OutputTarget]
+        var connections: [Connection]
         var colors: [String: Int]
-        var presets: [Preset]
-        var appRedirects: [String: AppRedirect]?
     }
 
     private func schedulePersist() {
@@ -210,10 +229,8 @@ final class MixerStore: ObservableObject {
 
     private func persist() {
         let payload = Persisted(
-            routes: routes,
-            colors: colors.mapValues { $0.rawValue },
-            presets: presets,
-            appRedirects: appRedirects
+            inputs: inputs, outputs: outputs, connections: connections,
+            colors: colors.mapValues { $0.rawValue }
         )
         do {
             let data = try JSONEncoder().encode(payload)
@@ -228,21 +245,19 @@ final class MixerStore: ObservableObject {
     private func load() {
         guard let data = try? Data(contentsOf: saveURL),
               let payload = try? JSONDecoder().decode(Persisted.self, from: data) else { return }
-        routes = payload.routes
+        inputs = payload.inputs
+        outputs = payload.outputs
+        connections = payload.connections
         colors = payload.colors.compactMapValues { ChannelColor(rawValue: $0) }
-        presets = payload.presets
-        appRedirects = payload.appRedirects ?? [:]
     }
 
     private static func defaultSaveURL() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
-        return base.appendingPathComponent("Audeon/config.json")
+        return base.appendingPathComponent("Audeon/graph.json")
     }
 
-    /// Deterministic default color so endpoints look stable before customizing.
-    private static func defaultColor(for uid: String) -> ChannelColor {
-        let idx = abs(uid.hashValue) % ChannelColor.allCases.count
-        return ChannelColor.allCases[idx]
+    private static func defaultColor(for key: String) -> ChannelColor {
+        ChannelColor.allCases[abs(key.hashValue) % ChannelColor.allCases.count]
     }
 }

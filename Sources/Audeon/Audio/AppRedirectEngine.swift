@@ -2,70 +2,56 @@ import Foundation
 import CoreAudio
 import Combine
 
-/// Per-application volume and redirect settings, keyed by bundle id.
-/// `outputUID == nil` means "follow the system default output".
-struct AppRedirect: Codable, Equatable {
-    var bundleID: String
-    var outputUID: String?
-    var volume: Double   // 0...1 (can exceed 1 later for boost)
-
-    init(bundleID: String, outputUID: String? = nil, volume: Double = 1.0) {
-        self.bundleID = bundleID
-        self.outputUID = outputUID
-        self.volume = volume
-    }
-
-    /// We only need to intercept an app's audio when it is not at full volume,
-    /// or when it is being sent somewhere other than the system default.
-    var isActive: Bool { outputUID != nil || volume < 0.999 }
+/// A request to send one app's audio to one output device at a given volume.
+struct AppTapRequest: Equatable {
+    let bundleID: String
+    let processObject: AudioObjectID
+    let outputUID: String
+    let volume: Float
 }
 
 /// Captures an app's audio with a Core Audio process tap and replays it to a
 /// chosen output device at a chosen volume, muting the original so the result is
-/// a true redirect. One tap + private aggregate device per active app.
+/// a true redirect. One tap + private aggregate device per (app, output) pair,
+/// so a single app can feed several outputs at once.
 final class AppRedirectEngine: ObservableObject {
     @Published private(set) var lastError: String?
 
     private let deviceManager: AudioDeviceManager
-    private var units: [String: TapUnit] = [:]
+    private var units: [String: TapUnit] = [:]   // key: "bundleID|outputUID"
     private let lock = NSLock()
 
     init(deviceManager: AudioDeviceManager) {
         self.deviceManager = deviceManager
     }
 
-    /// Reconcile running taps with the desired redirects.
-    func apply(redirects: [AppRedirect], apps: [AudioApp], defaultOutputUID: String?) {
+    private func key(_ bundleID: String, _ outputUID: String) -> String { "\(bundleID)|\(outputUID)" }
+
+    /// Reconcile running taps with the desired set of app connections.
+    func apply(_ requests: [AppTapRequest]) {
         lock.lock(); defer { lock.unlock() }
 
-        let appByBundle = Dictionary(uniqueKeysWithValues: apps.map { ($0.bundleID, $0) })
-
-        // Determine the desired unit configuration per bundle id.
-        struct Want { let process: AudioObjectID; let outputUID: String; let volume: Float }
-        var wanted: [String: Want] = [:]
-        for r in redirects where r.isActive {
-            guard let app = appByBundle[r.bundleID],
-                  let outUID = r.outputUID ?? defaultOutputUID,
-                  deviceManager.deviceID(forUID: outUID) != nil else { continue }
-            wanted[r.bundleID] = Want(process: app.processObject, outputUID: outUID, volume: Float(r.volume))
+        var wanted: [String: AppTapRequest] = [:]
+        for r in requests where deviceManager.deviceID(forUID: r.outputUID) != nil {
+            wanted[key(r.bundleID, r.outputUID)] = r
         }
 
-        // Tear down units no longer wanted or whose target/process changed.
-        for (bundle, unit) in units {
-            if let w = wanted[bundle], w.process == unit.process, w.outputUID == unit.outputUID {
+        // Tear down units no longer wanted or whose process changed.
+        for (k, unit) in units {
+            if let w = wanted[k], w.processObject == unit.process {
                 unit.setVolume(w.volume)
             } else {
                 unit.stop()
-                units[bundle] = nil
+                units[k] = nil
             }
         }
 
         // Start units that are wanted but not yet running.
-        for (bundle, w) in wanted where units[bundle] == nil {
-            if let unit = TapUnit(process: w.process, outputUID: w.outputUID, volume: w.volume) {
-                units[bundle] = unit
+        for (k, w) in wanted where units[k] == nil {
+            if let unit = TapUnit(process: w.processObject, outputUID: w.outputUID, volume: w.volume) {
+                units[k] = unit
             } else {
-                DispatchQueue.main.async { self.lastError = "Could not redirect \(bundle)" }
+                DispatchQueue.main.async { self.lastError = "Could not capture \(w.bundleID)" }
             }
         }
     }

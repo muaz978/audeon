@@ -19,45 +19,31 @@ creators. Audeon rebuilds that workflow from scratch on top of Apple frameworks
 at home on macOS with native menus, keyboard shortcuts, a menu bar control, and
 automatic dark mode.
 
-## Two workspaces
+## The routing canvas
 
-Switch between them with the segmented control in the title bar, or from the menu
-button next to the title.
+One canvas, the way the original works:
 
-### Apps & System
-
-- A System section to set the default Output, Input, and Sound Effects device,
-  with output volume and sample rate controls for the selected output.
-- An Applications section that auto-detects every running app the audio system
-  knows about, showing its icon and name with a per-app volume control and a
-  Redirect Audio To picker. Redirecting captures the app with a Core Audio
-  process tap and replays it to the chosen device at the chosen volume, so for
-  example you can send a chat app to your headphones only.
-
-### Device Routing
-
-- The original routing matrix for wiring physical inputs to outputs.
+- Add input picks a source, which can be a capture device (a microphone or
+  interface) or a running application. Each source becomes a card on the left.
+- Add output picks an output device. Each becomes a card on the right.
+- Drag from a source card's pin to an output card's pin to connect them, or click
+  the source pin and then click an output pin. A cable is drawn and audio flows.
+- Many to one is supported: several sources can feed one output, and one source
+  can feed several outputs.
 
 ## Features
 
-- Discovers every CoreAudio input and output, and refreshes automatically when
-  you plug or unplug a device.
-- Two column canvas: inputs on the left, outputs on the right, with routing lines
-  drawn across the middle.
-- Click to connect: tap an input dot, then an output dot, to create a route. One
-  input can feed many outputs, and one output can be fed by many inputs.
-- A real audio engine. Each route runs its own AVAudioEngine wiring the chosen
-  input device through a gain stage to the chosen output device. Sample rate
-  differences between devices are handled by the mixer node.
-- Per route volume, mute, and solo.
-- Master controls: Mute All / Unmute All, and Clear Solo.
-- Professional metering: each route shows a level bar normalized from dBFS, the
-  bar turns amber then red as the signal approaches full scale, and a clip dot
-  lights when the signal hits the ceiling.
-- A menu bar control for quick muting without raising the main window.
-- Color customizable channels, saved between launches.
-- Session presets saved to disk, so you can switch between setups instantly.
-- Native menus and keyboard shortcuts. Dark mode is automatic.
+- Add device or application inputs, and output devices, on a single canvas.
+- Drag a pin to an output to connect, or click one pin then the other.
+- A real audio engine. Device sources run through an AVAudioEngine that wires the
+  device to the chosen output with gain. Application sources are captured with a
+  Core Audio process tap and replayed to the chosen output, so you can send one
+  app to your headphones only.
+- Per-card volume and mute for both inputs and outputs.
+- Color customizable cards and cables, saved between launches.
+- System default device pickers (Output, Input, Sound Effects) in Settings.
+- Auto-detects running apps and refreshes the device list on hot plug.
+- Native menus, a menu bar item, and automatic dark mode.
 
 ## Requirements
 
@@ -122,49 +108,44 @@ System Settings > Privacy & Security > Microphone.
 
 ## How to use
 
-1. Connect your microphones and audio interfaces. They appear in the INPUTS
-   column on the left, and your speakers and headphones appear in OUTPUTS on the
-   right.
-2. Tap an input's colored dot. It highlights to show it is waiting to connect.
-3. Tap an output's dot. A routing line is drawn and audio starts flowing.
-4. Use the MIXER strip at the bottom to adjust volume, mute, solo, watch the
-   meter, or disconnect a route.
-5. Use Mute All when you need instant silence, or Solo to hear one route on its
-   own. Soloing any route silences the rest until you Clear Solo.
-6. Save a layout as a preset with Cmd-S, and recall it from the Presets menu.
-7. Use the menu bar icon to mute or unmute routes without opening the window.
+1. Click Add input and pick a device or a running app. It appears as a card on
+   the left.
+2. Click Add output and pick an output device. It appears as a card on the right.
+3. Drag from the source card's pin to the output card's pin to connect them, or
+   click the source pin and then click an output pin. A cable is drawn and audio
+   flows.
+4. Connect as many cables as you like. Several inputs can feed one output.
+5. Use each card's slider and mute button to set levels.
+6. Set the system default Output, Input, and Sound Effects devices in Settings.
 
 ## Keyboard shortcuts
 
 | Action | Shortcut |
 |--------|----------|
-| Save Preset | Cmd-S |
-| Mute All / Unmute All | Shift-Cmd-M |
+| Settings | Cmd-, |
+| Refresh Devices & Apps | Cmd-R |
 | Disconnect All | Shift-Cmd-K |
-| Refresh Devices | Cmd-R |
 
 ## How it works
 
 | File | Role |
 |------|------|
 | `Audio/AudioDeviceManager.swift` | CoreAudio device enumeration and a hot plug change listener |
-| `Audio/AudioRouter.swift` | One AVAudioEngine per route, gain, solo logic, dBFS metering and clip detection |
-| `Models/Route.swift` | Route, color palette, and preset value types |
-| `Models/MixerStore.swift` | App state, persistence, presets, master controls, engine sync |
-| `Views/ContentView.swift` | Toolbar, two column canvas, and the connection overlay |
-| `Views/EndpointColumnView.swift` | Input and output cards with connector dots and color pickers |
-| `Views/ConnectionsOverlay.swift` | The routing lines, drawn with anchor preferences |
-| `Views/RouteInspectorView.swift` | The mixer strips: volume, mute, solo, meters, clip |
-| `Views/AppsView.swift` | The Apps & System workspace: device pickers, per-app volume and redirect |
-| `Views/SettingsView.swift` | The Settings sheet from the menu button |
-| `Audio/SystemAudioController.swift` | Reads and sets the default Output, Input, and Sound Effects devices |
+| `Audio/AudioRouter.swift` | One AVAudioEngine per device-to-device route, with gain |
 | `Audio/AppAudioManager.swift` | Auto-detects running apps via the Core Audio process object list |
-| `Audio/AppRedirectEngine.swift` | Per-app process tap, private aggregate device, and gain passthrough |
+| `Audio/AppRedirectEngine.swift` | Per app and output process tap, private aggregate device, gain passthrough |
+| `Audio/SystemAudioController.swift` | Reads and sets the default Output, Input, and Sound Effects devices |
 | `Audio/DeviceControls.swift` | Per-device volume and sample rate |
+| `Models/GraphModels.swift` | Input sources, output targets, and connection value types |
+| `Models/MixerStore.swift` | Graph state, persistence, drag-connect, and engine sync |
+| `Models/Route.swift` | Route and color palette used by the device router |
+| `Views/RoutingCanvasView.swift` | The canvas: Add input or output, cards, pins, and cables |
+| `Views/ContentView.swift` | Window chrome and the menu button |
+| `Views/SettingsView.swift` | Settings sheet with system default device pickers |
 | `AudeonApp.swift` | App entry point, native menus, and the menu bar control |
 
-Routing settings, presets, and per-app redirects are stored in
-`~/Library/Application Support/Audeon/config.json`.
+The canvas (inputs, outputs, connections, and colors) is stored in
+`~/Library/Application Support/Audeon/graph.json`.
 
 ## Roadmap
 

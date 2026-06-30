@@ -9,61 +9,32 @@ struct AudeonApp: App {
         WindowGroup("Audeon") {
             ContentView()
                 .environmentObject(store)
-                .frame(minWidth: 880, minHeight: 560)
+                .frame(minWidth: 960, minHeight: 600)
         }
         .windowToolbarStyle(.unified)
         .commands {
-            // Native menu + keyboard shortcuts (free on macOS).
-            CommandGroup(replacing: .newItem) {
-                Button("Save Preset...") { store.requestSavePreset() }
-                    .keyboardShortcut("s", modifiers: .command)
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings...") { store.showSettings = true }
+                    .keyboardShortcut(",", modifiers: .command)
             }
             CommandMenu("Routing") {
-                Button(store.allMuted ? "Unmute All" : "Mute All") { store.toggleMuteAll() }
-                    .keyboardShortcut("m", modifiers: [.command, .shift])
-                Button("Clear Solo") { store.clearSolo() }
-                    .disabled(!store.anySolo)
-                Divider()
-                Button("Disconnect All") { store.routes.removeAll() }
+                Button("Refresh Devices & Apps") {
+                    store.deviceManager.refresh(); store.appManager.refresh()
+                }.keyboardShortcut("r", modifiers: .command)
+                Button("Disconnect All") { store.connections.removeAll() }
                     .keyboardShortcut("k", modifiers: [.command, .shift])
-                Button("Refresh Devices") { store.deviceManager.refresh() }
-                    .keyboardShortcut("r", modifiers: .command)
             }
         }
 
-        // Menu bar control for quick muting without raising the window.
-        MenuBarExtra("Audeon", systemImage: store.allMuted ? "speaker.slash.fill" : "speaker.wave.2.fill") {
-            MenuBarContent()
-                .environmentObject(store)
-        }
-    }
-}
-
-/// Compact menu bar panel: master mute and per-route quick mute.
-private struct MenuBarContent: View {
-    @EnvironmentObject var store: MixerStore
-
-    var body: some View {
-        Button(store.allMuted ? "Unmute All" : "Mute All") { store.toggleMuteAll() }
-        if store.anySolo {
-            Button("Clear Solo") { store.clearSolo() }
-        }
-        Divider()
-        if store.routes.isEmpty {
-            Text("No routes")
-        } else {
-            ForEach(store.routes) { route in
-                let inName = store.deviceManager.endpoint(forUID: route.inputUID)?.name ?? "?"
-                let outName = store.deviceManager.endpoint(forUID: route.outputUID)?.name ?? "?"
-                Button {
-                    store.toggleMute(route.id)
-                } label: {
-                    Text("\(route.isMuted ? "Muted" : "On"): \(inName) to \(outName)")
-                }
+        MenuBarExtra("Audeon", systemImage: "slider.horizontal.3") {
+            Button("Open Audeon") {
+                NSApp.activate(ignoringOtherApps: true)
             }
+            Button("Refresh Devices & Apps") {
+                store.deviceManager.refresh(); store.appManager.refresh()
+            }
+            Divider()
+            Button("Quit Audeon") { NSApplication.shared.terminate(nil) }
         }
-        Divider()
-        Button("Quit") { NSApplication.shared.terminate(nil) }
-            .keyboardShortcut("q")
     }
 }

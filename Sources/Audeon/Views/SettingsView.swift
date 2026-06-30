@@ -20,6 +20,21 @@ struct SettingsView: View {
             Divider()
 
             Group {
+                Text("System defaults").font(.subheadline.bold())
+                defaultPicker("Output", store.deviceManager.outputs, store.systemAudio.defaultOutputUID) {
+                    store.systemAudio.setDefaultOutput($0)
+                }
+                defaultPicker("Input", store.deviceManager.inputs, store.systemAudio.defaultInputUID) {
+                    store.systemAudio.setDefaultInput($0)
+                }
+                defaultPicker("Sound Effects", store.deviceManager.outputs, store.systemAudio.defaultSystemOutputUID) {
+                    store.systemAudio.setDefaultSystemOutput($0)
+                }
+            }
+
+            Divider()
+
+            Group {
                 Text("Permissions").font(.subheadline.bold())
                 Text("Audeon needs Microphone access to read input devices, and it captures application audio with Core Audio process taps.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -51,7 +66,18 @@ struct SettingsView: View {
             }
         }
         .padding(20)
-        .frame(width: 420, height: 320)
+        .frame(width: 440, height: 480)
+    }
+
+    private func defaultPicker(_ label: String, _ devices: [AudioEndpoint], _ selected: String?, _ onSelect: @escaping (String) -> Void) -> some View {
+        HStack {
+            Text(label).font(.caption).frame(width: 100, alignment: .leading)
+            Menu(devices.first { $0.uid == selected }?.name ?? "Default") {
+                ForEach(devices) { d in Button(d.name) { onSelect(d.uid) } }
+            }
+            .fixedSize()
+            Spacer()
+        }
     }
 
     private var appVersion: String {
