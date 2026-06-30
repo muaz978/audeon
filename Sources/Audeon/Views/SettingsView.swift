@@ -1,90 +1,108 @@
 import SwiftUI
 import AppKit
+import ServiceManagement
 
-/// The Settings sheet reached from the menu button, mirroring SoundSource's
-/// Settings / Permissions / About entries.
+/// Tabbed settings, in the spirit of the SoundSource Settings window.
 struct SettingsView: View {
-    @EnvironmentObject var store: MixerStore
-    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        TabView {
+            GeneralTab().tabItem { Label("General", systemImage: "switch.2") }
+            AppearanceTab().tabItem { Label("Appearance", systemImage: "eye") }
+            AudioTab().tabItem { Label("Audio", systemImage: "hifispeaker") }
+        }
+        .frame(width: 460, height: 360)
+    }
+}
+
+private struct GeneralTab: View {
+    @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 12) {
-                Image(systemName: "slider.horizontal.3").font(.title2)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Audeon").font(.headline)
-                    Text("Version \(appVersion)").font(.caption).foregroundStyle(.secondary)
-                }
+        Form {
+            Section("General") {
+                Toggle("Start Audeon at login", isOn: $launchAtLogin)
+                    .onChange(of: launchAtLogin) { _, on in
+                        do { on ? try SMAppService.mainApp.register() : try SMAppService.mainApp.unregister() }
+                        catch { launchAtLogin = SMAppService.mainApp.status == .enabled }
+                    }
             }
-
-            Divider()
-
-            Group {
-                Text("System defaults").font(.subheadline.bold())
-                defaultPicker("Output", store.deviceManager.outputs, store.systemAudio.defaultOutputUID) {
-                    store.systemAudio.setDefaultOutput($0)
-                }
-                defaultPicker("Input", store.deviceManager.inputs, store.systemAudio.defaultInputUID) {
-                    store.systemAudio.setDefaultInput($0)
-                }
-                defaultPicker("Sound Effects", store.deviceManager.outputs, store.systemAudio.defaultSystemOutputUID) {
-                    store.systemAudio.setDefaultSystemOutput($0)
-                }
-            }
-
-            Divider()
-
-            Group {
-                Text("Permissions").font(.subheadline.bold())
-                Text("Audeon needs Microphone access to read input devices, and it captures application audio with Core Audio process taps.")
+            Section("Software update") {
+                Text("Audeon is distributed on GitHub. New versions appear on the Releases page.")
                     .font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    Button("Open Microphone Settings") {
-                        open("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
-                    }
-                    Button("Open Sound Settings") {
-                        open("x-apple.systempreferences:com.apple.preference.sound")
-                    }
-                }
-            }
-
-            Divider()
-
-            Group {
-                Text("Project").font(.subheadline.bold())
-                HStack {
-                    Button("Repository") { open("https://github.com/muaz978/audeon") }
-                    Button("Releases") { open("https://github.com/muaz978/audeon/releases") }
-                }
-            }
-
-            Spacer()
-
-            HStack {
-                Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                Button("Check for Updates") { open("https://github.com/muaz978/audeon/releases") }
             }
         }
-        .padding(20)
-        .frame(width: 440, height: 480)
+        .formStyle(.grouped)
+        .padding()
     }
+}
 
-    private func defaultPicker(_ label: String, _ devices: [AudioEndpoint], _ selected: String?, _ onSelect: @escaping (String) -> Void) -> some View {
-        HStack {
-            Text(label).font(.caption).frame(width: 100, alignment: .leading)
-            Menu(devices.first { $0.uid == selected }?.name ?? "Default") {
-                ForEach(devices) { d in Button(d.name) { onSelect(d.uid) } }
+private struct AppearanceTab: View {
+    @AppStorage("appearance") private var appearance = "system"
+
+    var body: some View {
+        Form {
+            Section("Theme") {
+                Picker("Appearance", selection: $appearance) {
+                    Text("Match System").tag("system")
+                    Text("Light").tag("light")
+                    Text("Dark").tag("dark")
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: appearance) { _, v in Appearance.apply(v) }
             }
-            .fixedSize()
-            Spacer()
+            Section {
+                Text("The menu bar item gives quick access without opening the window.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+    }
+}
+
+private struct AudioTab: View {
+    @EnvironmentObject var store: MixerStore
+
+    var body: some View {
+        Form {
+            Section("Audio processing") {
+                Text("Application audio is captured with Core Audio process taps and replayed directly to the chosen output with drift compensation, so latency stays low.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Permissions") {
+                Button("Open Microphone Settings") {
+                    open("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+                }
+                Button("Open Sound Settings") {
+                    open("x-apple.systempreferences:com.apple.preference.sound")
+                }
+            }
+            Section("Maintenance") {
+                Button("Clean up leftover Audeon devices") {
+                    AppRedirectEngine.cleanupLeakedAggregates()
+                    store.deviceManager.refresh()
+                }
+                Text("Removes any private capture devices left behind by an unexpected quit.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+    }
+}
+
+/// Applies the chosen theme to the whole app.
+enum Appearance {
+    static func apply(_ value: String) {
+        switch value {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark":  NSApp.appearance = NSAppearance(named: .darkAqua)
+        default:      NSApp.appearance = nil
         }
     }
+}
 
-    private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
-    }
-
-    private func open(_ string: String) {
-        if let url = URL(string: string) { NSWorkspace.shared.open(url) }
-    }
+private func open(_ string: String) {
+    if let url = URL(string: string) { NSWorkspace.shared.open(url) }
 }

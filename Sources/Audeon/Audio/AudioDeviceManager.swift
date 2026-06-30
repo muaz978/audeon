@@ -68,6 +68,8 @@ final class AudioDeviceManager: ObservableObject {
         for id in ids {
             guard let uid = Self.stringProperty(id, kAudioDevicePropertyDeviceUID),
                   let name = Self.deviceName(id) else { continue }
+            // Hide Audeon's own private aggregate devices from the lists.
+            if uid.hasPrefix(audeonAggregateUIDPrefix) || name == audeonAggregateName { continue }
             newMap[uid] = id
 
             if Self.channelCount(id, scope: kAudioObjectPropertyScopeInput) > 0 {

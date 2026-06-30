@@ -1,19 +1,29 @@
 import Foundation
+import AVFoundation
 import CoreAudio
 import Combine
 
-/// A request to send one app's audio to one output device at a given volume.
+/// UID prefix for the private aggregate devices Audeon creates per app capture.
+/// Used both to recognize and to hide them from the device lists.
+let audeonAggregateUIDPrefix = "audeon.redirect."
+let audeonAggregateName = "Audeon Redirect"
+
+/// A request to send one app's audio to one output device with volume, boost,
+/// and EQ.
 struct AppTapRequest: Equatable {
     let bundleID: String
     let processObject: AudioObjectID
     let outputUID: String
     let volume: Float
+    let boost: Double
+    let eqEnabled: Bool
+    let eq: [Double]
 }
 
-/// Captures an app's audio with a Core Audio process tap and replays it to a
-/// chosen output device at a chosen volume, muting the original so the result is
-/// a true redirect. One tap + private aggregate device per (app, output) pair,
-/// so a single app can feed several outputs at once.
+/// Captures an app's audio with a Core Audio process tap and replays it through
+/// an AVAudioEngine (with EQ and boost) to a chosen output device, muting the
+/// original. One tap + private aggregate device per (app, output) pair, so an
+/// app can feed several outputs at once.
 final class AppRedirectEngine: ObservableObject {
     @Published private(set) var lastError: String?
 
@@ -23,11 +33,11 @@ final class AppRedirectEngine: ObservableObject {
 
     init(deviceManager: AudioDeviceManager) {
         self.deviceManager = deviceManager
+        Self.cleanupLeakedAggregates()
     }
 
     private func key(_ bundleID: String, _ outputUID: String) -> String { "\(bundleID)|\(outputUID)" }
 
-    /// Reconcile running taps with the desired set of app connections.
     func apply(_ requests: [AppTapRequest]) {
         lock.lock(); defer { lock.unlock() }
 
@@ -36,19 +46,16 @@ final class AppRedirectEngine: ObservableObject {
             wanted[key(r.bundleID, r.outputUID)] = r
         }
 
-        // Tear down units no longer wanted or whose process changed.
         for (k, unit) in units {
             if let w = wanted[k], w.processObject == unit.process {
-                unit.setVolume(w.volume)
+                unit.configure(volume: w.volume, boost: w.boost, eqEnabled: w.eqEnabled, eq: w.eq)
             } else {
-                unit.stop()
-                units[k] = nil
+                unit.stop(); units[k] = nil
             }
         }
 
-        // Start units that are wanted but not yet running.
         for (k, w) in wanted where units[k] == nil {
-            if let unit = TapUnit(process: w.processObject, outputUID: w.outputUID, volume: w.volume) {
+            if let unit = TapUnit(request: w) {
                 units[k] = unit
             } else {
                 DispatchQueue.main.async { self.lastError = "Could not capture \(w.bundleID)" }
@@ -61,45 +68,61 @@ final class AppRedirectEngine: ObservableObject {
         units.values.forEach { $0.stop() }
         units.removeAll()
     }
+
+    /// Destroy any private aggregate devices left behind by a previous run.
+    static func cleanupLeakedAggregates() {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size) == noErr else { return }
+        var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &ids) == noErr else { return }
+        for id in ids {
+            var uidAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyDeviceUID,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain)
+            var s = UInt32(MemoryLayout<CFString?>.size)
+            var v: CFString? = nil
+            let st = withUnsafeMutablePointer(to: &v) { AudioObjectGetPropertyData(id, &uidAddr, 0, nil, &s, $0) }
+            if st == noErr, let uid = v as String?, uid.hasPrefix(audeonAggregateUIDPrefix) {
+                AudioHardwareDestroyAggregateDevice(id)
+            }
+        }
+    }
 }
 
 // MARK: - One tapped app
 
 private final class TapUnit {
     let process: AudioObjectID
-    let outputUID: String
 
     private var tapID: AudioObjectID = 0
     private var aggregateID: AudioObjectID = 0
-    private var procID: AudioDeviceIOProcID?
-    private let gain = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+    private let engine = AVAudioEngine()
+    private let eq = AVAudioUnitEQ(numberOfBands: AudioEQ.bandCount)
+    private var started = false
 
-    init?(process: AudioObjectID, outputUID: String, volume: Float) {
-        self.process = process
-        self.outputUID = outputUID
-        gain.initialize(to: volume)
+    init?(request: AppTapRequest) {
+        self.process = request.processObject
 
-        // Process taps require macOS 14.2+. On older systems this redirect is
-        // simply unavailable and the app's audio keeps using its normal output.
         guard #available(macOS 14.2, *) else { cleanup(); return nil }
 
-        // 1. Tap the process, muting its normal output so we can replace it.
-        let desc = CATapDescription(stereoMixdownOfProcesses: [process])
+        let desc = CATapDescription(stereoMixdownOfProcesses: [request.processObject])
         desc.muteBehavior = .muted
-        guard AudioHardwareCreateProcessTap(desc, &tapID) == noErr, tapID != 0 else {
-            cleanup(); return nil
-        }
+        guard AudioHardwareCreateProcessTap(desc, &tapID) == noErr, tapID != 0 else { cleanup(); return nil }
         guard let tapUID = Self.cfString(tapID, kAudioTapPropertyUID) else { cleanup(); return nil }
 
-        // 2. Private aggregate device: the chosen output device + this tap.
-        let aggUID = "audeon.redirect.\(process).\(UInt32.random(in: 1...UInt32.max))"
+        let aggUID = "\(audeonAggregateUIDPrefix)\(request.processObject).\(UInt32.random(in: 1...UInt32.max))"
         let aggDesc: [String: Any] = [
-            kAudioAggregateDeviceNameKey as String: "Audeon Redirect",
+            kAudioAggregateDeviceNameKey as String: audeonAggregateName,
             kAudioAggregateDeviceUIDKey as String: aggUID,
             kAudioAggregateDeviceIsPrivateKey as String: 1,
             kAudioAggregateDeviceIsStackedKey as String: 0,
-            kAudioAggregateDeviceMainSubDeviceKey as String: outputUID,
-            kAudioAggregateDeviceSubDeviceListKey as String: [[kAudioSubDeviceUIDKey as String: outputUID]],
+            kAudioAggregateDeviceMainSubDeviceKey as String: request.outputUID,
+            kAudioAggregateDeviceSubDeviceListKey as String: [[kAudioSubDeviceUIDKey as String: request.outputUID]],
             kAudioAggregateDeviceTapListKey as String: [[
                 kAudioSubTapDriftCompensationKey as String: 1,
                 kAudioSubTapUIDKey as String: tapUID
@@ -108,38 +131,43 @@ private final class TapUnit {
         guard AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &aggregateID) == noErr,
               aggregateID != 0 else { cleanup(); return nil }
 
-        // 3. Realtime passthrough with gain.
-        let gainPtr = gain
-        let status = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, nil) {
-            (_, inInput, _, outOutput, _) in
-            let input = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInput))
-            let output = UnsafeMutableAudioBufferListPointer(outOutput)
-            let g = gainPtr.pointee
-            for i in 0..<min(input.count, output.count) {
-                guard let src = input[i].mData, let dst = output[i].mData else { continue }
-                let bytes = Int(min(input[i].mDataByteSize, output[i].mDataByteSize))
-                let count = bytes / MemoryLayout<Float>.size
-                let s = src.assumingMemoryBound(to: Float.self)
-                let d = dst.assumingMemoryBound(to: Float.self)
-                for k in 0..<count { d[k] = s[k] * g }
-            }
+        // Bind the engine's input and output to the aggregate (tap in, device out).
+        guard Self.setDevice(engine.inputNode.audioUnit, aggregateID) == noErr,
+              Self.setDevice(engine.outputNode.audioUnit, aggregateID) == noErr else { cleanup(); return nil }
+
+        for (i, f) in AudioEQ.frequencies.enumerated() {
+            let band = eq.bands[i]
+            band.filterType = .parametric
+            band.frequency = f
+            band.bandwidth = 1.0
+            band.gain = 0
+            band.bypass = true
         }
-        guard status == noErr, let procID = procID else { cleanup(); return nil }
-        guard AudioDeviceStart(aggregateID, procID) == noErr else { cleanup(); return nil }
+        engine.attach(eq)
+        let fmt = engine.inputNode.outputFormat(forBus: 0)
+        engine.connect(engine.inputNode, to: eq, format: fmt)
+        engine.connect(eq, to: engine.mainMixerNode, format: fmt)
+        engine.connect(engine.mainMixerNode, to: engine.outputNode,
+                       format: engine.outputNode.inputFormat(forBus: 0))
+        configure(volume: request.volume, boost: request.boost, eqEnabled: request.eqEnabled, eq: request.eq)
+
+        do { engine.prepare(); try engine.start(); started = true }
+        catch { cleanup(); return nil }
     }
 
-    func setVolume(_ v: Float) { gain.pointee = v }
+    func configure(volume: Float, boost: Double, eqEnabled: Bool, eq gains: [Double]) {
+        engine.mainMixerNode.outputVolume = volume
+        eq.globalGain = volume <= 0 ? -96 : AudioEQ.boostDecibels(boost)
+        for (i, band) in eq.bands.enumerated() where i < gains.count {
+            band.bypass = !eqEnabled
+            band.gain = Float(gains[i])
+        }
+    }
 
     func stop() { cleanup() }
 
-    deinit { gain.deallocate() }
-
     private func cleanup() {
-        if let p = procID, aggregateID != 0 {
-            AudioDeviceStop(aggregateID, p)
-            AudioDeviceDestroyIOProcID(aggregateID, p)
-        }
-        procID = nil
+        if started { engine.stop(); started = false }
         if aggregateID != 0 { AudioHardwareDestroyAggregateDevice(aggregateID); aggregateID = 0 }
         if tapID != 0 {
             if #available(macOS 14.2, *) { AudioHardwareDestroyProcessTap(tapID) }
@@ -147,17 +175,21 @@ private final class TapUnit {
         }
     }
 
+    private static func setDevice(_ unit: AudioUnit?, _ dev: AudioObjectID) -> OSStatus {
+        guard let unit = unit else { return -1 }
+        var d = dev
+        return AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
+                                    kAudioUnitScope_Global, 0, &d,
+                                    UInt32(MemoryLayout<AudioObjectID>.size))
+    }
+
     private static func cfString(_ obj: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String? {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: selector,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
+        var addr = AudioObjectPropertyAddress(mSelector: selector,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
         var size = UInt32(MemoryLayout<CFString?>.size)
         var v: CFString? = nil
-        let s = withUnsafeMutablePointer(to: &v) {
-            AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, $0)
-        }
+        let s = withUnsafeMutablePointer(to: &v) { AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, $0) }
         guard s == noErr, let v = v else { return nil }
         return v as String
     }

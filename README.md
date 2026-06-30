@@ -35,15 +35,23 @@ One canvas, the way the original works:
 
 - Add device or application inputs, and output devices, on a single canvas.
 - Drag a pin to an output to connect, or click one pin then the other.
-- A real audio engine. Device sources run through an AVAudioEngine that wires the
-  device to the chosen output with gain. Application sources are captured with a
-  Core Audio process tap and replayed to the chosen output, so you can send one
-  app to your headphones only.
-- Per-card volume and mute for both inputs and outputs.
-- Color customizable cards and cables, saved between launches.
-- System default device pickers (Output, Input, Sound Effects) in Settings.
-- Auto-detects running apps and refreshes the device list on hot plug.
-- Native menus, a menu bar item, and automatic dark mode.
+- A real audio engine. Both device and application sources run through an
+  AVAudioEngine with a 10 band EQ. Application sources are captured with a Core
+  Audio process tap and replayed directly to the chosen output, so you can send
+  one app to your headphones only.
+- Per input volume, mute, a 1x to 4x volume boost, and a 10 band EQ with presets.
+- Per output volume and mute.
+- Connect one input to several outputs. Each input lists its connected outputs,
+  and you can disconnect any one of them from the card.
+- Click a cable to delete just that connection.
+- Drag inputs or outputs to reorder them.
+- Hide inactive applications in the Add input list.
+- Color customizable cards and cables, with smooth animations, saved between
+  launches.
+- A tabbed Settings window: start at login, theme, system default devices, and a
+  cleanup tool for leftover capture devices.
+- A menu bar panel to tweak each input's volume, mute, and boost without opening
+  the window.
 
 ## Requirements
 

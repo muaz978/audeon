@@ -23,6 +23,12 @@ final class MixerStore: ObservableObject {
     /// The cable the user clicked, showing its delete control.
     @Published var selectedConnectionID: UUID?
 
+    /// Hide apps that are not currently producing audio, in the Add input list.
+    @Published var hideInactiveApps: Bool = false
+
+    /// The card being dragged for reordering.
+    @Published var draggingCardID: UUID?
+
     let deviceManager: AudioDeviceManager
     let router: AudioRouter
     let systemAudio: SystemAudioController
@@ -100,6 +106,47 @@ final class MixerStore: ObservableObject {
         if selectedConnectionID == id { selectedConnectionID = nil }
     }
 
+    func disconnect(sourceID: UUID, outputID: UUID) {
+        connections.removeAll { $0.sourceID == sourceID && $0.outputID == outputID }
+    }
+
+    /// The output cards a given source is currently connected to.
+    func connectedOutputs(for sourceID: UUID) -> [OutputTarget] {
+        let ids = connections.filter { $0.sourceID == sourceID }.map { $0.outputID }
+        return outputs.filter { ids.contains($0.id) }
+    }
+
+    // MARK: - Reordering (drag)
+
+    func moveInput(id draggedID: UUID, before targetID: UUID) {
+        guard draggedID != targetID,
+              let from = inputs.firstIndex(where: { $0.id == draggedID }),
+              let to = inputs.firstIndex(where: { $0.id == targetID }) else { return }
+        let item = inputs.remove(at: from)
+        let insert = inputs.firstIndex(where: { $0.id == targetID }) ?? to
+        inputs.insert(item, at: insert)
+    }
+
+    func moveOutput(id draggedID: UUID, before targetID: UUID) {
+        guard draggedID != targetID,
+              let from = outputs.firstIndex(where: { $0.id == draggedID }),
+              let to = outputs.firstIndex(where: { $0.id == targetID }) else { return }
+        let item = outputs.remove(at: from)
+        let insert = outputs.firstIndex(where: { $0.id == targetID }) ?? to
+        outputs.insert(item, at: insert)
+    }
+
+    // MARK: - EQ and boost
+
+    func setBoost(_ value: Double, for sourceID: UUID) { updateInput(sourceID) { $0.boost = value } }
+    func toggleEQ(for sourceID: UUID) { updateInput(sourceID) { $0.eqEnabled.toggle() } }
+    func setEQBand(_ index: Int, _ gain: Double, for sourceID: UUID) {
+        updateInput(sourceID) { if index < $0.eq.count { $0.eq[index] = gain } }
+    }
+    func applyEQPreset(_ gains: [Double], for sourceID: UUID) {
+        updateInput(sourceID) { $0.eq = gains; $0.eqEnabled = true }
+    }
+
     // MARK: - Per-card controls
 
     func updateInput(_ id: UUID, _ mutate: (inout InputSource) -> Void) {
@@ -174,7 +221,10 @@ final class MixerStore: ObservableObject {
                     inputUID: "input:\(uid)",
                     outputUID: "output:\(output.uid)",
                     volume: Double(gain),
-                    isMuted: gain == 0
+                    isMuted: gain == 0,
+                    boost: source.boost,
+                    eqEnabled: source.eqEnabled,
+                    eq: source.eq
                 ))
             case .app(let bundleID):
                 guard let app = appByBundle[bundleID] else { continue }
@@ -182,7 +232,10 @@ final class MixerStore: ObservableObject {
                     bundleID: bundleID,
                     processObject: app.processObject,
                     outputUID: output.uid,
-                    volume: gain
+                    volume: gain,
+                    boost: source.boost,
+                    eqEnabled: source.eqEnabled,
+                    eq: source.eq
                 ))
             }
         }

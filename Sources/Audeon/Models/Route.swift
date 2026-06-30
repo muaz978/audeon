@@ -23,13 +23,15 @@ enum ChannelColor: Int, Codable, CaseIterable, Identifiable {
 }
 
 /// A live audio route from an input endpoint to an output endpoint.
-struct Route: Identifiable, Codable, Equatable {
+struct Route: Identifiable, Equatable {
     let id: UUID
     var inputUID: String     // direction-qualified endpoint key, e.g. "input:UID"
     var outputUID: String    // direction-qualified endpoint key, e.g. "output:UID"
     var volume: Double   // 0...1
     var isMuted: Bool
-    var isSoloed: Bool
+    var boost: Double        // 1...4
+    var eqEnabled: Bool
+    var eq: [Double]         // band gains in dB
 
     /// Raw device uids for engine wiring, stripped of the direction prefix.
     var inputDeviceUID: String { AudioEndpoint.uid(fromKey: inputUID) }
@@ -40,42 +42,16 @@ struct Route: Identifiable, Codable, Equatable {
          outputUID: String,
          volume: Double = 0.8,
          isMuted: Bool = false,
-         isSoloed: Bool = false) {
+         boost: Double = 1.0,
+         eqEnabled: Bool = false,
+         eq: [Double] = AudioEQ.flat) {
         self.id = id
         self.inputUID = inputUID
         self.outputUID = outputUID
         self.volume = volume
         self.isMuted = isMuted
-        self.isSoloed = isSoloed
-    }
-
-    /// Backwards compatible decoding: older presets have no solo field.
-    enum CodingKeys: String, CodingKey {
-        case id, inputUID, outputUID, volume, isMuted, isSoloed
-    }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decode(UUID.self, forKey: .id)
-        inputUID = try c.decode(String.self, forKey: .inputUID)
-        outputUID = try c.decode(String.self, forKey: .outputUID)
-        volume = try c.decode(Double.self, forKey: .volume)
-        isMuted = try c.decode(Bool.self, forKey: .isMuted)
-        isSoloed = try c.decodeIfPresent(Bool.self, forKey: .isSoloed) ?? false
-    }
-}
-
-/// A named snapshot of routes + colors, like MIXLINE session presets.
-struct Preset: Identifiable, Codable, Equatable {
-    let id: UUID
-    var name: String
-    var routes: [Route]
-    var colors: [String: Int]   // endpoint uid -> ChannelColor.rawValue
-
-    init(id: UUID = UUID(), name: String, routes: [Route], colors: [String: Int]) {
-        self.id = id
-        self.name = name
-        self.routes = routes
-        self.colors = colors
+        self.boost = boost
+        self.eqEnabled = eqEnabled
+        self.eq = eq
     }
 }

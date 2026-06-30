@@ -9,6 +9,7 @@ struct AudioApp: Identifiable, Equatable {
     let name: String
     let pid: pid_t
     let processObject: AudioObjectID
+    let isActive: Bool        // currently producing output audio
 
     var id: String { bundleID }
 
@@ -59,7 +60,8 @@ final class AppAudioManager: ObservableObject {
                   !seen.contains(bundleID) else { continue }
             seen.insert(bundleID)
             let name = running.localizedName ?? bundleID
-            result.append(AudioApp(bundleID: bundleID, name: name, pid: pid, processObject: obj))
+            let active = Self.flag(obj, kAudioProcessPropertyIsRunningOutput)
+            result.append(AudioApp(bundleID: bundleID, name: name, pid: pid, processObject: obj, isActive: active))
         }
 
         let sorted = result.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -83,6 +85,16 @@ final class AppAudioManager: ObservableObject {
         guard AudioObjectGetPropertyData(
             AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &out) == noErr else { return [] }
         return out
+    }
+
+    private static func flag(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector) -> Bool {
+        var addr = AudioObjectPropertyAddress(mSelector: selector,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        var v: UInt32 = 0
+        guard AudioObjectGetPropertyData(object, &addr, 0, nil, &size, &v) == noErr else { return false }
+        return v != 0
     }
 
     private static func pid(of object: AudioObjectID) -> pid_t? {

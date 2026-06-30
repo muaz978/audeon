@@ -3,6 +3,7 @@ import AppKit
 
 struct ContentView: View {
     @EnvironmentObject var store: MixerStore
+    @AppStorage("appearance") private var appearance = "system"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -11,7 +12,8 @@ struct ContentView: View {
             RoutingCanvasView()
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .sheet(isPresented: $store.showSettings) { SettingsView() }
+        .sheet(isPresented: $store.showSettings) { SettingsView().environmentObject(store) }
+        .onAppear { Appearance.apply(appearance) }
     }
 
     private var header: some View {
