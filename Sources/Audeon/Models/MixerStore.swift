@@ -133,6 +133,29 @@ final class MixerStore: ObservableObject {
         }
     }
 
+    /// Find or create an output card for a device uid.
+    @discardableResult
+    func ensureOutput(uid: String) -> UUID {
+        if let o = outputs.first(where: { $0.uid == uid }) { return o.id }
+        let o = OutputTarget(uid: uid)
+        outputs.append(o)
+        return o.id
+    }
+
+    /// Redirect helpers used by the menu bar (route to a hardware device).
+    func connectedDeviceUIDs(for sourceID: UUID) -> Set<String> {
+        Set(connectedOutputs(for: sourceID).map { $0.uid })
+    }
+
+    func toggleRouteToDevice(sourceID: UUID, deviceUID: String) {
+        let outID = ensureOutput(uid: deviceUID)
+        toggleConnection(sourceID: sourceID, outputID: outID)
+    }
+
+    func clearRoutes(for sourceID: UUID) {
+        connections.removeAll { $0.sourceID == sourceID }
+    }
+
     func disconnect(sourceID: UUID, outputID: UUID) {
         connections.removeAll { $0.sourceID == sourceID && $0.outputID == outputID }
     }
