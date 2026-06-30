@@ -15,9 +15,11 @@ struct InputSource: Identifiable, Codable, Equatable {
     var boost: Double      // 1...4 volume overdrive multiplier
     var eqEnabled: Bool
     var eq: [Double]       // per band gain in dB, length AudioEQ.bandCount
+    var displayName: String?   // remembered name so closed apps still read well
 
     init(id: UUID = UUID(), kind: SourceKind, volume: Double = 1.0, isMuted: Bool = false,
-         boost: Double = 1.0, eqEnabled: Bool = false, eq: [Double] = AudioEQ.flat) {
+         boost: Double = 1.0, eqEnabled: Bool = false, eq: [Double] = AudioEQ.flat,
+         displayName: String? = nil) {
         self.id = id
         self.kind = kind
         self.volume = volume
@@ -25,9 +27,10 @@ struct InputSource: Identifiable, Codable, Equatable {
         self.boost = boost
         self.eqEnabled = eqEnabled
         self.eq = eq
+        self.displayName = displayName
     }
 
-    enum CodingKeys: String, CodingKey { case id, kind, volume, isMuted, boost, eqEnabled, eq }
+    enum CodingKeys: String, CodingKey { case id, kind, volume, isMuted, boost, eqEnabled, eq, displayName }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -39,7 +42,11 @@ struct InputSource: Identifiable, Codable, Equatable {
         eqEnabled = try c.decodeIfPresent(Bool.self, forKey: .eqEnabled) ?? false
         let stored = try c.decodeIfPresent([Double].self, forKey: .eq) ?? AudioEQ.flat
         eq = stored.count == AudioEQ.bandCount ? stored : AudioEQ.flat
+        displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
     }
+
+    var appBundleID: String? { if case .app(let b) = kind { return b } else { return nil } }
+    var deviceUID: String? { if case .device(let u) = kind { return u } else { return nil } }
 
     /// Linear gain before EQ, combining volume, mute, and boost.
     var effectiveGain: Float { isMuted ? 0 : Float(volume) }

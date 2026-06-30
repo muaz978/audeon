@@ -70,9 +70,24 @@ final class MixerStore: ObservableObject {
         inputs.append(InputSource(kind: .device(uid)))
     }
 
-    func addAppInput(bundleID: String) {
+    func addAppInput(bundleID: String, name: String? = nil) {
         guard !inputs.contains(where: { $0.kind == .app(bundleID) }) else { return }
-        inputs.append(InputSource(kind: .app(bundleID)))
+        inputs.append(InputSource(kind: .app(bundleID), displayName: name))
+    }
+
+    /// An app source is active when its process is running; a device source when
+    /// the device is present. Inactive cards stay on the canvas and reconnect
+    /// automatically when the app reopens or the device returns.
+    func isActive(_ source: InputSource) -> Bool {
+        switch source.kind {
+        case .app(let b): return appManager.apps.contains { $0.bundleID == b }
+        case .device(let u): return deviceManager.deviceID(forUID: u) != nil
+        }
+    }
+
+    /// Inputs to show on the canvas, honoring the hide-inactive filter.
+    var visibleInputs: [InputSource] {
+        hideInactiveApps ? inputs.filter { isActive($0) } : inputs
     }
 
     func removeInput(_ id: UUID) {
@@ -265,25 +280,26 @@ final class MixerStore: ObservableObject {
 
     func title(for source: InputSource) -> String {
         switch source.kind {
-        case .device(let uid): return deviceManager.endpoint(forUID: uid)?.name ?? "Device"
-        case .app(let bundleID): return appManager.apps.first { $0.bundleID == bundleID }?.name ?? bundleID
+        case .device(let uid): return deviceManager.endpoint(forUID: uid)?.name ?? source.displayName ?? "Device"
+        case .app(let bundleID):
+            return appManager.apps.first { $0.bundleID == bundleID }?.name ?? source.displayName ?? bundleID
         }
     }
 
     func subtitle(for source: InputSource) -> String {
+        if !isActive(source) { return "Inactive" }
         switch source.kind {
         case .device: return "Input device"
-        case .app:
-            if let uid = systemAudio.defaultOutputUID, let name = deviceManager.endpoint(forUID: uid)?.name {
-                return name
-            }
-            return "Application"
+        case .app: return "Application"
         }
     }
 
     func icon(for source: InputSource) -> NSImage? {
-        if case .app(let bundleID) = source.kind {
-            return appManager.apps.first { $0.bundleID == bundleID }?.icon
+        guard case .app(let bundleID) = source.kind else { return nil }
+        if let img = appManager.apps.first(where: { $0.bundleID == bundleID })?.icon { return img }
+        // Resolve from the installed app bundle so closed apps still show an icon.
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            return NSWorkspace.shared.icon(forFile: url.path)
         }
         return nil
     }

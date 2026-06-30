@@ -9,33 +9,22 @@ struct PinFramesKey: PreferenceKey {
     }
 }
 
+private let cardWidth: CGFloat = 360
+private let columnWidth: CGFloat = 460
+
 /// The Mixline-style routing canvas.
 struct RoutingCanvasView: View {
     @EnvironmentObject var store: MixerStore
 
     var body: some View {
         VStack(spacing: 0) {
-            menuBar
+            addBar
             ZStack {
                 CableLayer()
                 HStack(alignment: .top, spacing: 0) {
-                    column(trailing: false) {
-                        ForEach(store.inputs) { source in
-                            InputCard(source: source)
-                                .transition(.scale.combined(with: .opacity))
-                                .opacity(store.draggingCardID == source.id ? 0.5 : 1)
-                        }
-                        if store.inputs.isEmpty { placeholder("Use Add input to add a device or app.") }
-                    }
+                    inputsColumn
                     Spacer(minLength: 0)
-                    column(trailing: true) {
-                        ForEach(store.outputs) { output in
-                            OutputCard(output: output)
-                                .transition(.scale.combined(with: .opacity))
-                                .opacity(store.draggingCardID == output.id ? 0.5 : 1)
-                        }
-                        if store.outputs.isEmpty { placeholder("Use Add output to add a device.") }
-                    }
+                    outputsColumn
                 }
                 ConnectionDeleteControl()
             }
@@ -44,66 +33,90 @@ struct RoutingCanvasView: View {
             .animation(.spring(response: 0.35, dampingFraction: 0.85), value: store.inputs)
             .animation(.spring(response: 0.35, dampingFraction: 0.85), value: store.outputs)
             .animation(.easeInOut(duration: 0.2), value: store.connections)
+            .animation(.easeInOut(duration: 0.2), value: store.hideInactiveApps)
         }
     }
 
-    private func column<C: View>(trailing: Bool, @ViewBuilder content: () -> C) -> some View {
+    // MARK: - Columns
+
+    private var inputsColumn: some View {
         ScrollView {
-            VStack(alignment: trailing ? .trailing : .leading, spacing: 12) {
-                Text(trailing ? "OUTPUTS" : "INPUTS").font(.caption.bold()).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: trailing ? .trailing : .leading)
-                content()
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text("INPUTS").font(.subheadline.bold()).foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        withAnimation { store.hideInactiveApps.toggle() }
+                    } label: {
+                        Label(store.hideInactiveApps ? "Show all" : "Hide inactive",
+                              systemImage: store.hideInactiveApps ? "eye.slash.fill" : "eye")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Temporarily hide inputs whose app is closed or device is unplugged")
+                }
+                ForEach(store.visibleInputs) { source in
+                    InputCard(source: source)
+                        .transition(.scale.combined(with: .opacity))
+                        .opacity(store.draggingCardID == source.id ? 0.5 : 1)
+                }
+                if store.inputs.isEmpty { placeholder("Use Add input to add a device or app.") }
             }
-            .padding(16)
+            .padding(18)
         }
-        .frame(width: 400)
+        .frame(width: columnWidth)
+    }
+
+    private var outputsColumn: some View {
+        ScrollView {
+            VStack(alignment: .trailing, spacing: 14) {
+                Text("OUTPUTS").font(.subheadline.bold()).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                ForEach(store.outputs) { output in
+                    OutputCard(output: output)
+                        .transition(.scale.combined(with: .opacity))
+                        .opacity(store.draggingCardID == output.id ? 0.5 : 1)
+                }
+                if store.outputs.isEmpty { placeholder("Use Add output to add a device.") }
+            }
+            .padding(18)
+        }
+        .frame(width: columnWidth)
     }
 
     private func placeholder(_ text: String) -> some View {
-        Text(text).font(.caption).foregroundStyle(.tertiary).padding(.vertical, 8)
+        Text(text).font(.callout).foregroundStyle(.tertiary).padding(.vertical, 8)
     }
 
-    // MARK: - Add menus
+    // MARK: - Add bar
 
-    private var menuBar: some View {
-        HStack(alignment: .center) {
-            HStack(spacing: 8) {
-                addInputMenu
-                Button {
-                    withAnimation { store.hideInactiveApps.toggle() }
-                } label: {
-                    Image(systemName: store.hideInactiveApps ? "line.3.horizontal.decrease.circle.fill"
-                                                             : "line.3.horizontal.decrease.circle")
-                }
-                .buttonStyle(.borderless)
-                .help("Hide inactive applications")
-            }
-            .frame(width: 400, alignment: .leading)
+    private var addBar: some View {
+        HStack {
+            addInputMenu.frame(width: columnWidth, alignment: .leading)
             Spacer(minLength: 0)
-            addOutputMenu.frame(width: 400, alignment: .trailing)
+            addOutputMenu.frame(width: columnWidth, alignment: .trailing)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
     }
 
     private var addInputMenu: some View {
         Menu {
-            let usedDevices = Set(store.inputs.compactMap { if case .device(let u) = $0.kind { return u } else { return nil } })
-            let usedApps = Set(store.inputs.compactMap { if case .app(let b) = $0.kind { return b } else { return nil } })
+            let usedDevices = Set(store.inputs.compactMap { $0.deviceUID })
+            let usedApps = Set(store.inputs.compactMap { $0.appBundleID })
             Section("Audio devices") {
                 ForEach(store.deviceManager.inputs.filter { !usedDevices.contains($0.uid) }) { d in
                     Button(d.name) { store.addDeviceInput(uid: d.uid) }
                 }
             }
             Section("Applications") {
-                ForEach(store.appManager.apps.filter { app in
-                    !usedApps.contains(app.bundleID) && (!store.hideInactiveApps || app.isActive)
-                }) { app in
-                    Button(app.name) { store.addAppInput(bundleID: app.bundleID) }
+                ForEach(store.appManager.apps.filter { !usedApps.contains($0.bundleID) }) { app in
+                    Button(app.name) { store.addAppInput(bundleID: app.bundleID, name: app.name) }
                 }
             }
         } label: {
-            Label("Add input", systemImage: "plus.circle.fill")
+            Label("Add input", systemImage: "plus.circle.fill").font(.body.weight(.medium))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -118,7 +131,7 @@ struct RoutingCanvasView: View {
                 }
             }
         } label: {
-            Label("Add output", systemImage: "plus.circle.fill")
+            Label("Add output", systemImage: "plus.circle.fill").font(.body.weight(.medium))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -127,9 +140,6 @@ struct RoutingCanvasView: View {
 
 // MARK: - Drag handle for reordering
 
-/// A grip the user drags up or down to reorder a card. Uses the canvas
-/// coordinate space and the pin geometry, so it works reliably inside the
-/// scrolling columns where system drag and drop does not.
 private struct DragHandle: View {
     @EnvironmentObject var store: MixerStore
     let cardID: UUID
@@ -137,9 +147,9 @@ private struct DragHandle: View {
 
     var body: some View {
         Image(systemName: "line.3.horizontal")
-            .font(.system(size: 11))
+            .font(.system(size: 13))
             .foregroundStyle(.secondary)
-            .padding(.horizontal, 2)
+            .padding(4)
             .contentShape(Rectangle())
             .help("Drag to reorder")
             .gesture(
@@ -176,20 +186,23 @@ private struct CableLayer: View {
         ZStack {
             ForEach(store.connections) { conn in
                 if let source = store.inputs.first(where: { $0.id == conn.sourceID }),
+                   store.visibleInputs.contains(where: { $0.id == conn.sourceID }),
                    let output = store.outputs.first(where: { $0.id == conn.outputID }),
                    let p1 = store.pinFrames[source.pinKey],
                    let p2 = store.pinFrames[output.pinKey] {
                     let selected = store.selectedConnectionID == conn.id
+                    let active = store.isActive(source)
                     let color = store.color(forPin: source.pinKey).color
                     ZStack {
                         CableShape(p1: p1, p2: p2)
-                            .stroke(color.opacity(selected ? 1 : 0.9),
-                                    style: StrokeStyle(lineWidth: selected ? 5 : 3, lineCap: .round))
-                            .shadow(color: color.opacity(0.4), radius: selected ? 4 : 0)
+                            .stroke(color.opacity(selected ? 1 : (active ? 0.9 : 0.35)),
+                                    style: StrokeStyle(lineWidth: selected ? 6 : 3.5, lineCap: .round,
+                                                       dash: active ? [] : [5, 5]))
+                            .shadow(color: color.opacity(selected ? 0.4 : 0), radius: selected ? 4 : 0)
                             .allowsHitTesting(false)
                         CableShape(p1: p1, p2: p2)
-                            .stroke(Color.white.opacity(0.001), style: StrokeStyle(lineWidth: 22, lineCap: .round))
-                            .contentShape(CableShape(p1: p1, p2: p2).stroke(style: StrokeStyle(lineWidth: 22, lineCap: .round)))
+                            .stroke(Color.white.opacity(0.001), style: StrokeStyle(lineWidth: 24, lineCap: .round))
+                            .contentShape(CableShape(p1: p1, p2: p2).stroke(style: StrokeStyle(lineWidth: 24, lineCap: .round)))
                             .onTapGesture { store.selectedConnectionID = conn.id }
                     }
                 }
@@ -200,7 +213,7 @@ private struct CableLayer: View {
                let p2 = store.dragPoint {
                 CableShape(p1: p1, p2: p2)
                     .stroke(store.color(forPin: source.pinKey).color.opacity(0.6),
-                            style: StrokeStyle(lineWidth: 3, lineCap: .round, dash: [6, 5]))
+                            style: StrokeStyle(lineWidth: 3.5, lineCap: .round, dash: [6, 5]))
                     .allowsHitTesting(false)
             }
         }
@@ -217,15 +230,15 @@ private struct ConnectionDeleteControl: View {
            let p1 = store.pinFrames[source.pinKey],
            let p2 = store.pinFrames[output.pinKey] {
             let mid = CGPoint(x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2)
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 Button(role: .destructive) { store.disconnect(id) } label: { Label("Delete", systemImage: "scissors") }
                 Button("Cancel") { store.selectedConnectionID = nil }
             }
-            .controlSize(.small)
-            .padding(8)
-            .background(RoundedRectangle(cornerRadius: 10).fill(.regularMaterial))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.primary.opacity(0.15)))
-            .shadow(radius: 6, y: 2)
+            .controlSize(.regular)
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 12).fill(.regularMaterial))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.primary.opacity(0.15)))
+            .shadow(radius: 8, y: 2)
             .position(mid)
             .transition(.scale.combined(with: .opacity))
         }
@@ -238,19 +251,20 @@ private struct Pin: View {
     let key: String
     let color: Color
     var highlighted: Bool = false
+    var dimmed: Bool = false
     var body: some View {
         Circle()
-            .fill(color)
-            .frame(width: 16, height: 16)
+            .fill(color.opacity(dimmed ? 0.4 : 1))
+            .frame(width: 18, height: 18)
             .overlay(Circle().strokeBorder(.white.opacity(highlighted ? 1 : 0.7), lineWidth: highlighted ? 3 : 1.5))
-            .scaleEffect(highlighted ? 1.2 : 1)
+            .scaleEffect(highlighted ? 1.25 : 1)
             .animation(.spring(response: 0.25, dampingFraction: 0.6), value: highlighted)
             .background(GeometryReader { g in
                 Color.clear.preference(key: PinFramesKey.self,
                     value: [key: CGPoint(x: g.frame(in: .named("canvas")).midX,
                                          y: g.frame(in: .named("canvas")).midY)])
             })
-            .contentShape(Rectangle().inset(by: -10))
+            .contentShape(Rectangle().inset(by: -12))
     }
 }
 
@@ -263,22 +277,26 @@ private struct InputCard: View {
 
     private var color: Color { store.color(forPin: source.pinKey).color }
     private var connected: [OutputTarget] { store.connectedOutputs(for: source.id) }
+    private var active: Bool { store.isActive(source) }
 
     var body: some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 8) {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) {
                 header
                 if !connected.isEmpty { connectedRow }
                 volumeRow
                 if expanded { ProcessingPanel(source: source) }
             }
-            .padding(10)
-            .background(RoundedRectangle(cornerRadius: 12).fill(color.opacity(0.12)))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(color.opacity(0.35)))
-            .frame(width: 320)
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 14).fill(color.opacity(active ? 0.14 : 0.05)))
+            .overlay(RoundedRectangle(cornerRadius: 14)
+                .strokeBorder(color.opacity(active ? 0.4 : 0.2),
+                              style: StrokeStyle(lineWidth: 1, dash: active ? [] : [4, 3])))
+            .frame(width: cardWidth)
 
             Pin(key: source.pinKey, color: color,
-                highlighted: store.pendingSourceID == source.id || store.dragSourceID == source.id)
+                highlighted: store.pendingSourceID == source.id || store.dragSourceID == source.id,
+                dimmed: !active)
                 .onTapGesture { store.handleSourcePinTap(source.id) }
                 .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named("canvas"))
                     .onChanged { v in store.dragSourceID = source.id; store.dragPoint = v.location }
@@ -287,64 +305,71 @@ private struct InputCard: View {
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             DragHandle(cardID: source.id) { store.reorderInput($0, toNearY: $1) }
             icon
-            VStack(alignment: .leading, spacing: 1) {
-                Text(store.title(for: source)).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                Text(connected.isEmpty ? store.subtitle(for: source) : "\(connected.count) output\(connected.count == 1 ? "" : "s")")
-                    .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(store.title(for: source)).font(.system(size: 15, weight: .semibold)).lineLimit(1)
+                HStack(spacing: 4) {
+                    if !active {
+                        Image(systemName: "moon.zzz.fill").font(.system(size: 9)).foregroundStyle(.orange)
+                    }
+                    Text(connected.isEmpty ? store.subtitle(for: source)
+                                           : "\(connected.count) output\(connected.count == 1 ? "" : "s")")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                }
             }
             Spacer()
             Button { withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() } } label: {
-                Image(systemName: expanded ? "slider.horizontal.3" : "slider.horizontal.below.rectangle")
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 14))
                     .foregroundStyle(source.eqEnabled || source.boost > 1 ? color : .secondary)
             }.buttonStyle(.borderless).help("EQ and boost")
             colorMenu
             Button { withAnimation { store.removeInput(source.id) } } label: {
-                Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-            }.buttonStyle(.borderless)
+                Image(systemName: "xmark.circle.fill").font(.system(size: 16)).foregroundStyle(.secondary)
+            }.buttonStyle(.borderless).help("Remove input")
         }
     }
 
     private var icon: some View {
         Group {
             if let img = store.icon(for: source) {
-                Image(nsImage: img).resizable().frame(width: 22, height: 22)
+                Image(nsImage: img).resizable().frame(width: 26, height: 26).opacity(active ? 1 : 0.5)
             } else {
-                Image(systemName: "mic.fill").frame(width: 22, height: 22).foregroundStyle(color)
+                Image(systemName: "mic.fill").font(.system(size: 16)).frame(width: 26, height: 26).foregroundStyle(color)
             }
         }
     }
 
     private var connectedRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             ForEach(connected) { o in
-                HStack(spacing: 6) {
-                    Circle().fill(store.color(forPin: o.pinKey).color).frame(width: 6, height: 6)
+                HStack(spacing: 8) {
+                    Circle().fill(store.color(forPin: o.pinKey).color).frame(width: 8, height: 8)
                     Text(store.deviceManager.endpoint(forUID: o.uid)?.name ?? "Output")
-                        .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                        .font(.system(size: 12)).foregroundStyle(.primary.opacity(0.8)).lineLimit(1)
                     Spacer()
                     Button { withAnimation { store.disconnect(sourceID: source.id, outputID: o.id) } } label: {
-                        Image(systemName: "minus.circle.fill").font(.system(size: 10)).foregroundStyle(.secondary)
+                        Image(systemName: "minus.circle.fill").font(.system(size: 16)).foregroundStyle(.red.opacity(0.8))
                     }.buttonStyle(.borderless).help("Disconnect this output")
                 }
             }
         }
-        .padding(6)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.06)))
     }
 
     private var volumeRow: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Button { store.updateInput(source.id) { $0.isMuted.toggle() } } label: {
                 Image(systemName: source.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .font(.system(size: 15))
                     .foregroundStyle(source.isMuted ? .red : .primary)
-            }.buttonStyle(.borderless)
+            }.buttonStyle(.borderless).help(source.isMuted ? "Unmute" : "Mute")
             Slider(value: Binding(get: { source.volume }, set: { v in store.updateInput(source.id) { $0.volume = v } }), in: 0...1)
-                .controlSize(.small)
-            Text("\(Int(source.volume * 100))%").font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.secondary).frame(width: 34, alignment: .trailing)
+            Text("\(Int(source.volume * 100))%").font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
         }
     }
 
@@ -353,8 +378,8 @@ private struct InputCard: View {
             ForEach(ChannelColor.allCases) { c in
                 Button(String(describing: c).capitalized) { store.setColor(c, forPin: source.pinKey) }
             }
-        } label: { Image(systemName: "paintpalette").font(.system(size: 10)).foregroundStyle(.secondary) }
-        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        } label: { Image(systemName: "paintpalette").font(.system(size: 14)).foregroundStyle(.secondary) }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Color")
     }
 }
 
@@ -365,35 +390,35 @@ private struct ProcessingPanel: View {
     let source: InputSource
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             Divider()
-            HStack(spacing: 6) {
-                Text("Boost").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Text("Boost").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
                 ForEach(1...4, id: \.self) { n in
                     Button("\(n)x") { store.setBoost(Double(n), for: source.id) }
-                        .buttonStyle(.borderless)
-                        .font(.system(size: 11, weight: Int(source.boost) == n ? .bold : .regular))
-                        .foregroundStyle(Int(source.boost) == n ? store.color(forPin: source.pinKey).color : .secondary)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .tint(Int(source.boost) == n ? store.color(forPin: source.pinKey).color : .gray)
                 }
             }
             HStack {
                 Toggle("10-Band EQ", isOn: Binding(get: { source.eqEnabled }, set: { _ in store.toggleEQ(for: source.id) }))
-                    .toggleStyle(.switch).controlSize(.mini).font(.system(size: 10, weight: .semibold))
+                    .toggleStyle(.switch).controlSize(.small).font(.system(size: 12, weight: .semibold))
                 Spacer()
                 Menu("Presets") {
                     ForEach(AudioEQ.presets, id: \.name) { p in
                         Button(p.name) { store.applyEQPreset(p.gains, for: source.id) }
                     }
-                }.menuStyle(.borderlessButton).fixedSize().font(.system(size: 10))
+                }.menuStyle(.borderlessButton).fixedSize().font(.system(size: 12))
             }
-            HStack(alignment: .bottom, spacing: 2) {
+            HStack(alignment: .bottom, spacing: 3) {
                 ForEach(0..<AudioEQ.bandCount, id: \.self) { i in
-                    VStack(spacing: 2) {
+                    VStack(spacing: 3) {
                         VerticalSlider(value: Binding(
                             get: { source.eq.indices.contains(i) ? source.eq[i] : 0 },
                             set: { store.setEQBand(i, $0, for: source.id) }))
                         Text(AudioEQ.shortLabel(forFrequency: AudioEQ.frequencies[i]))
-                            .font(.system(size: 7)).foregroundStyle(.secondary)
+                            .font(.system(size: 8)).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -408,9 +433,9 @@ private struct VerticalSlider: View {
     var body: some View {
         Slider(value: $value, in: -12...12)
             .controlSize(.mini)
-            .frame(width: 78)
+            .frame(width: 92)
             .rotationEffect(.degrees(-90))
-            .frame(width: 22, height: 82)
+            .frame(width: 26, height: 96)
     }
 }
 
@@ -424,36 +449,36 @@ private struct OutputCard: View {
     private var name: String { store.deviceManager.endpoint(forUID: output.uid)?.name ?? "Output" }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             Pin(key: output.pinKey, color: color,
                 highlighted: store.pendingSourceID != nil || store.dragSourceID != nil)
                 .onTapGesture { store.handleOutputPinTap(output.id) }
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
                     DragHandle(cardID: output.id) { store.reorderOutput($0, toNearY: $1) }
-                    Image(systemName: "hifispeaker.fill").frame(width: 22, height: 22).foregroundStyle(color)
-                    Text(name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    Image(systemName: "hifispeaker.fill").font(.system(size: 16)).frame(width: 26, height: 26).foregroundStyle(color)
+                    Text(name).font(.system(size: 15, weight: .semibold)).lineLimit(1)
                     Spacer()
                     colorMenu
                     Button { withAnimation { store.removeOutput(output.id) } } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                    }.buttonStyle(.borderless)
+                        Image(systemName: "xmark.circle.fill").font(.system(size: 16)).foregroundStyle(.secondary)
+                    }.buttonStyle(.borderless).help("Remove output")
                 }
-                HStack(spacing: 8) {
+                HStack(spacing: 10) {
                     Button { store.updateOutput(output.id) { $0.isMuted.toggle() } } label: {
                         Image(systemName: output.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            .font(.system(size: 15))
                             .foregroundStyle(output.isMuted ? .red : .primary)
                     }.buttonStyle(.borderless)
                     Slider(value: Binding(get: { output.volume }, set: { v in store.updateOutput(output.id) { $0.volume = v } }), in: 0...1)
-                        .controlSize(.small)
-                    Text("\(Int(output.volume * 100))%").font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary).frame(width: 34, alignment: .trailing)
+                    Text("\(Int(output.volume * 100))%").font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
                 }
             }
-            .padding(10)
-            .background(RoundedRectangle(cornerRadius: 12).fill(color.opacity(0.12)))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(color.opacity(0.35)))
-            .frame(width: 320)
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 14).fill(color.opacity(0.14)))
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(color.opacity(0.4)))
+            .frame(width: cardWidth)
         }
     }
 
@@ -462,7 +487,7 @@ private struct OutputCard: View {
             ForEach(ChannelColor.allCases) { c in
                 Button(String(describing: c).capitalized) { store.setColor(c, forPin: output.pinKey) }
             }
-        } label: { Image(systemName: "paintpalette").font(.system(size: 10)).foregroundStyle(.secondary) }
-        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        } label: { Image(systemName: "paintpalette").font(.system(size: 14)).foregroundStyle(.secondary) }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Color")
     }
 }
