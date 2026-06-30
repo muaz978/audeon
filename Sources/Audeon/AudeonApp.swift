@@ -37,9 +37,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 460, height: 600)
-        popover.contentViewController = NSHostingController(
+        let hosting = NSHostingController(
             rootView: QuickControlsView().environmentObject(MixerStore.shared))
+        hosting.sizingOptions = [.preferredContentSize]   // popover grows to fit the view
+        popover.contentViewController = hosting
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
@@ -60,14 +61,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-// MARK: - Quick controls popover (SoundSource-style)
+// MARK: - Quick controls popover (SoundSource-style, Full / Compact)
 
 private struct QuickControlsView: View {
     @EnvironmentObject var store: MixerStore
+    @AppStorage("menuCompact") private var compact = false
     @State private var expanded: Set<UUID> = []
     @State private var systemOpen = true
     @State private var appsOpen = true
-    @State private var muteMemory: [String: Float] = [:]   // device uid -> volume before mute
+    @State private var muteMemory: [String: Float] = [:]
+
+    // Column widths for the full layout.
+    private let nameW: CGFloat = 188
+    private let volW: CGFloat = 176
+    private let boostW: CGFloat = 46
+    private let devW: CGFloat = 168
+    private let fxW: CGFloat = 24
+    private var fullWidth: CGFloat { nameW + volW + boostW + devW + fxW + 4 * 8 + 28 }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -78,12 +88,13 @@ private struct QuickControlsView: View {
                     systemSection
                     appsSection
                 }
-                .padding(12)
+                .padding(.horizontal, 14).padding(.vertical, 12)
             }
+            .frame(maxHeight: 520)
             Divider()
             footer
         }
-        .frame(width: 460)
+        .frame(width: compact ? 360 : fullWidth)
     }
 
     private var header: some View {
@@ -91,11 +102,14 @@ private struct QuickControlsView: View {
             Image(systemName: "slider.horizontal.3")
             Text("Audeon").font(.headline)
             Spacer()
+            Button { withAnimation(.easeInOut(duration: 0.15)) { compact.toggle() } } label: {
+                Image(systemName: compact ? "arrow.up.left.and.arrow.down.right"
+                                          : "arrow.down.right.and.arrow.up.left")
+            }.buttonStyle(.borderless).help(compact ? "Expand" : "Compact")
             Button {
                 NSApp.activate(ignoringOtherApps: true)
                 for w in NSApp.windows where w.canBecomeMain { w.makeKeyAndOrderFront(nil); break }
-            } label: { Image(systemName: "macwindow") }
-            .buttonStyle(.borderless).help("Open main window")
+            } label: { Image(systemName: "macwindow") }.buttonStyle(.borderless).help("Open main window")
             Button { MixerStore.shared.showSettings = true; NSApp.activate(ignoringOtherApps: true) } label: {
                 Image(systemName: "gearshape")
             }.buttonStyle(.borderless).help("Settings")
@@ -129,26 +143,26 @@ private struct QuickControlsView: View {
                     Button(app.name) { store.addAppInput(bundleID: app.bundleID, name: app.name) }
                 }
             }
-        } label: {
-            Label("Add", systemImage: "plus")
-        }.menuStyle(.borderlessButton).fixedSize().controlSize(.small)
+        } label: { Label("Add", systemImage: "plus") }
+        .menuStyle(.borderlessButton).fixedSize().controlSize(.small)
     }
 
-    // MARK: System section
+    // MARK: System
 
     private var systemSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             sectionHeader("System", isOpen: $systemOpen)
             if systemOpen {
                 VStack(spacing: 0) {
+                    if !compact { columnHeader(deviceTitle: "Device") }
                     systemRow("Output", icon: "speaker.wave.2.fill", scope: .output,
                               currentUID: store.systemAudio.defaultOutputUID,
                               devices: store.deviceManager.outputs) { store.systemAudio.setDefaultOutput($0) }
-                    Divider().padding(.leading, 38)
+                    Divider().padding(.leading, 30)
                     systemRow("Input", icon: "mic.fill", scope: .input,
                               currentUID: store.systemAudio.defaultInputUID,
                               devices: store.deviceManager.inputs) { store.systemAudio.setDefaultInput($0) }
-                    Divider().padding(.leading, 38)
+                    Divider().padding(.leading, 30)
                     systemRow("Sound Effects", icon: "bell.fill", scope: .output,
                               currentUID: store.systemAudio.defaultSystemOutputUID,
                               devices: store.deviceManager.outputs) { store.systemAudio.setDefaultSystemOutput($0) }
@@ -163,23 +177,36 @@ private struct QuickControlsView: View {
                            currentUID: String?, devices: [AudioEndpoint],
                            onSelect: @escaping (String) -> Void) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: icon).frame(width: 22).foregroundStyle(.secondary)
-            Text(label).font(.system(size: 13, weight: .medium)).frame(width: 96, alignment: .leading)
+            HStack(spacing: 8) {
+                Image(systemName: icon).frame(width: 20).foregroundStyle(.secondary)
+                Text(label).font(.system(size: 13, weight: .medium)).lineLimit(1)
+            }.frame(width: compact ? nil : nameW, alignment: .leading)
+            if compact { Spacer(minLength: 4) }
+
             if let uid = currentUID {
-                muteButton(uid: uid, scope: scope)
-                Slider(value: deviceVolumeBinding(uid: uid, scope: scope), in: 0...1)
-                    .controlSize(.small).tint(.green).frame(width: 92)
-                percent(deviceVolumeBinding(uid: uid, scope: scope).wrappedValue)
-            } else {
-                Spacer()
+                HStack(spacing: 6) {
+                    muteButton(uid: uid, scope: scope)
+                    Slider(value: deviceVolumeBinding(uid: uid, scope: scope), in: 0...1)
+                        .controlSize(.small).tint(.green)
+                    percent(deviceVolumeBinding(uid: uid, scope: scope).wrappedValue)
+                }.frame(width: compact ? 150 : volW)
+            } else if !compact {
+                Color.clear.frame(width: volW, height: 1)
             }
-            Spacer(minLength: 4)
-            deviceMenu(currentUID: currentUID, devices: devices, onSelect: onSelect)
+
+            if !compact {
+                Color.clear.frame(width: boostW, height: 1)   // no boost for system
+                deviceMenu(currentUID: currentUID, devices: devices, onSelect: onSelect)
+                    .frame(width: devW, alignment: .trailing)
+                Color.clear.frame(width: fxW, height: 1)      // no fx for system
+            } else {
+                deviceMenu(currentUID: currentUID, devices: devices, onSelect: onSelect)
+            }
         }
         .padding(.vertical, 7)
     }
 
-    // MARK: Applications section
+    // MARK: Applications
 
     private var appsSection: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -190,8 +217,9 @@ private struct QuickControlsView: View {
                         .font(.caption).foregroundStyle(.secondary).padding(8)
                 } else {
                     VStack(spacing: 0) {
+                        if !compact { columnHeader(deviceTitle: "Redirect Audio To") }
                         ForEach(Array(store.inputs.enumerated()), id: \.element.id) { idx, source in
-                            if idx > 0 { Divider().padding(.leading, 38) }
+                            if idx > 0 { Divider().padding(.leading, 30) }
                             appRow(source)
                         }
                     }
@@ -208,29 +236,36 @@ private struct QuickControlsView: View {
         let isOpen = expanded.contains(source.id)
         VStack(spacing: 8) {
             HStack(spacing: 8) {
-                Button { store.removeInput(source.id) } label: {
-                    Image(systemName: "star.fill").font(.system(size: 11)).foregroundStyle(.yellow)
-                }.buttonStyle(.borderless).help("Remove from list")
-                appIcon(source, color: color)
-                Text(store.title(for: source)).font(.system(size: 13, weight: .medium)).lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .opacity(store.isActive(source) ? 1 : 0.6)
+                HStack(spacing: 6) {
+                    Button { store.removeInput(source.id) } label: {
+                        Image(systemName: "star.fill").font(.system(size: 11)).foregroundStyle(.yellow)
+                    }.buttonStyle(.borderless).help("Remove from list")
+                    appIcon(source, color: color)
+                    Text(store.title(for: source)).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                        .opacity(store.isActive(source) ? 1 : 0.6)
+                }.frame(width: compact ? nil : nameW, alignment: .leading)
+                if compact { Spacer(minLength: 4) }
 
-                muteButton2(isMuted: source.isMuted) { store.updateInput(source.id) { $0.isMuted.toggle() } }
-                Slider(value: Binding(get: { source.volume },
-                                      set: { v in store.updateInput(source.id) { $0.volume = v } }), in: 0...1)
-                    .controlSize(.small).tint(.green).frame(width: 84)
-                percent(source.volume)
-                Button("\(Int(source.boost))x") { cycleBoost(source) }
-                    .buttonStyle(.bordered).controlSize(.small)
-                    .tint(source.boost > 1 ? color : .gray)
-                    .help("Volume Overdrive")
-                redirectMenu(source)
-                Button { toggle(source.id) } label: {
-                    Image(systemName: isOpen ? "chevron.up" : "chevron.right").font(.system(size: 11))
-                }.buttonStyle(.borderless).help("Effects")
+                HStack(spacing: 6) {
+                    muteButton2(isMuted: source.isMuted) { store.updateInput(source.id) { $0.isMuted.toggle() } }
+                    Slider(value: Binding(get: { source.volume },
+                                          set: { v in store.updateInput(source.id) { $0.volume = v } }), in: 0...1)
+                        .controlSize(.small).tint(.green)
+                    percent(source.volume)
+                }.frame(width: compact ? 150 : volW)
+
+                if !compact {
+                    Button("\(Int(source.boost))x") { cycleBoost(source) }
+                        .buttonStyle(.bordered).controlSize(.small)
+                        .tint(source.boost > 1 ? color : .gray)
+                        .frame(width: boostW)
+                    redirectMenu(source).frame(width: devW, alignment: .trailing)
+                    Button { toggle(source.id) } label: {
+                        Image(systemName: isOpen ? "chevron.up" : "chevron.right").font(.system(size: 11))
+                    }.buttonStyle(.borderless).frame(width: fxW)
+                }
             }
-            if isOpen { eqPanel(source, color: color) }
+            if isOpen && !compact { eqPanel(source, color: color) }
         }
         .padding(.vertical, 7)
     }
@@ -247,13 +282,13 @@ private struct QuickControlsView: View {
                     }
                 }.menuStyle(.borderlessButton).fixedSize().font(.system(size: 11))
             }
-            HStack(alignment: .bottom, spacing: 2) {
+            HStack(alignment: .bottom, spacing: 3) {
                 ForEach(0..<AudioEQ.bandCount, id: \.self) { i in
                     VStack(spacing: 2) {
                         vSlider(Binding(get: { source.eq.indices.contains(i) ? source.eq[i] : 0 },
                                         set: { store.setEQBand(i, $0, for: source.id) }))
                         Text(AudioEQ.shortLabel(forFrequency: AudioEQ.frequencies[i]))
-                            .font(.system(size: 7)).foregroundStyle(.secondary)
+                            .font(.system(size: 8)).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -263,7 +298,19 @@ private struct QuickControlsView: View {
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.06)))
     }
 
-    // MARK: Pieces
+    // MARK: Shared pieces
+
+    private func columnHeader(deviceTitle: String) -> some View {
+        HStack(spacing: 8) {
+            Color.clear.frame(width: nameW, height: 1)
+            Text("Volume").frame(width: volW)
+            Text("Boost").frame(width: boostW)
+            Text(deviceTitle).frame(width: devW)
+            Color.clear.frame(width: fxW, height: 1)
+        }
+        .font(.caption2).foregroundStyle(.secondary)
+        .padding(.bottom, 4)
+    }
 
     private func sectionHeader(_ title: String, isOpen: Binding<Bool>) -> some View {
         Button { withAnimation(.easeInOut(duration: 0.15)) { isOpen.wrappedValue.toggle() } } label: {
@@ -303,7 +350,7 @@ private struct QuickControlsView: View {
             ForEach(devices) { d in Button(d.name) { onSelect(d.uid) } }
         } label: {
             Text(devices.first { $0.uid == currentUID }?.name ?? "Default")
-                .font(.system(size: 11)).lineLimit(1).frame(maxWidth: 120, alignment: .trailing)
+                .font(.system(size: 11)).lineLimit(1)
         }.menuStyle(.borderlessButton).fixedSize()
     }
 
@@ -326,16 +373,14 @@ private struct QuickControlsView: View {
             HStack(spacing: 3) {
                 Image(systemName: "arrow.up.forward").font(.system(size: 9))
                 Text(label).font(.system(size: 11)).lineLimit(1)
-            }.frame(maxWidth: 116, alignment: .trailing)
+            }
         }.menuStyle(.borderlessButton).fixedSize()
     }
 
     private func vSlider(_ value: Binding<Double>) -> some View {
         Slider(value: value, in: -12...12).controlSize(.mini).tint(.green)
-            .frame(width: 74).rotationEffect(.degrees(-90)).frame(width: 22, height: 78)
+            .frame(width: 80).rotationEffect(.degrees(-90)).frame(width: 24, height: 84)
     }
-
-    // MARK: System device volume + mute
 
     private func deviceVolumeBinding(uid: String, scope: EndpointKind) -> Binding<Double> {
         Binding(
@@ -371,8 +416,7 @@ private struct QuickControlsView: View {
     }
 
     private func cycleBoost(_ source: InputSource) {
-        let next = source.boost >= 4 ? 1.0 : source.boost + 1
-        store.setBoost(next, for: source.id)
+        store.setBoost(source.boost >= 4 ? 1.0 : source.boost + 1, for: source.id)
     }
 
     private func toggle(_ id: UUID) {
