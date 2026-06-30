@@ -68,8 +68,12 @@ final class AudioDeviceManager: ObservableObject {
         for id in ids {
             guard let uid = Self.stringProperty(id, kAudioDevicePropertyDeviceUID),
                   let name = Self.deviceName(id) else { continue }
-            // Hide Audeon's own private aggregate devices from the lists.
-            if uid.hasPrefix(audeonAggregateUIDPrefix) || name == audeonAggregateName { continue }
+            // Hide Audeon's own private aggregate devices from the lists: the
+            // per-app capture aggregates ("audeon.redirect.") and the
+            // cross-device routing aggregates ("audeon.route."). Matching by a
+            // shared "audeon." prefix means any future internal aggregate is
+            // hidden automatically without another call site to remember.
+            if uid.hasPrefix("audeon.") || name == audeonAggregateName || name == "Audeon Route" { continue }
             newMap[uid] = id
 
             if Self.channelCount(id, scope: kAudioObjectPropertyScopeInput) > 0 {

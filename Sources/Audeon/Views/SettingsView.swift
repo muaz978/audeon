@@ -196,9 +196,10 @@ private struct AudioTab: View {
             Section("Maintenance") {
                 Button("Clean up leftover Audeon devices") {
                     AppRedirectEngine.cleanupLeakedAggregates()
+                    AudioRouter.cleanupLeakedAggregates()
                     store.deviceManager.refresh()
                 }
-                Text("Removes any private capture devices left behind by an unexpected quit.")
+                Text("Removes any private capture or routing devices left behind by an unexpected quit, or by a route that failed to connect.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

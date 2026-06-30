@@ -81,7 +81,11 @@ struct RoutingCanvasView: View {
                         .transition(.scale.combined(with: .opacity))
                         .opacity(store.draggingCardID == source.id ? 0.5 : 1)
                 }
-                if store.inputs.isEmpty { placeholder("Use Add input to add a device or app.") }
+                if store.inputs.isEmpty {
+                    placeholder("Use Add input to add a device or app.")
+                } else if store.visibleInputs.isEmpty {
+                    placeholder("Every input is inactive right now. Turn off Hide inactive to see them.")
+                }
             }
             .padding(18)
         }

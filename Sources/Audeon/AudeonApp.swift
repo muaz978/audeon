@@ -34,6 +34,7 @@ struct AudeonApp: App {
 /// so the popover reliably drops from the icon and observes the shared store.
 extension Notification.Name { static let audeonShowOnboarding = Notification.Name("AudeonShowOnboarding") }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
@@ -55,7 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Reopen onboarding on request (from Settings).
         NotificationCenter.default.addObserver(forName: .audeonShowOnboarding, object: nil, queue: .main) { [weak self] _ in
-            self?.showOnboarding()
+            DispatchQueue.main.async { self?.showOnboarding() }
         }
         // Rebuild the audio engines after the machine wakes from sleep.
         NSWorkspace.shared.notificationCenter.addObserver(

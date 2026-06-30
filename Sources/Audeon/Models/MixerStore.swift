@@ -102,6 +102,14 @@ final class MixerStore: ObservableObject {
 
     func loadScene(_ id: UUID) {
         guard let s = scenes.first(where: { $0.id == id }) else { return }
+        // Clear any in-progress pin interaction first: it references ids from
+        // the graph that is about to be replaced wholesale, and completing it
+        // afterward could create a connection to a source or output that no
+        // longer exists in the loaded scene.
+        pendingSourceID = nil
+        dragSourceID = nil
+        dragPoint = nil
+        selectedConnectionID = nil
         colors = s.colors.compactMapValues { ChannelColor(rawValue: $0) }
         outputs = s.outputs
         inputs = s.inputs
@@ -162,6 +170,12 @@ final class MixerStore: ObservableObject {
     func connect(sourceID: UUID, outputID: UUID) {
         guard !isConnected(sourceID: sourceID, outputID: outputID) else { return }
         connections.append(Connection(sourceID: sourceID, outputID: outputID))
+        // A manual connection and "follow system output" are mutually
+        // exclusive (applyGraph() only ever honors one). Without this, a
+        // source could carry a stale cable on the canvas that looks
+        // connected while audio is actually following the system default
+        // elsewhere, or vice versa after re-enabling follow mode.
+        updateInput(sourceID) { if $0.followsSystemOutput { $0.followsSystemOutput = false } }
     }
 
     func disconnect(_ id: UUID) {
@@ -216,33 +230,52 @@ final class MixerStore: ObservableObject {
     /// routes are keyed by connection id in AudioRouter; app taps are keyed by
     /// "bundleID|outputUID" in AppRedirectEngine.
     func meterReading(for source: InputSource) -> MeterReading {
+        // Following the system output uses a different routing key than a
+        // manual connection in both applyGraph() and the two engines: a
+        // device route is keyed by the source's own id (no Connection
+        // involved), and an app tap is keyed by "bundleID|outputUID" against
+        // the current default output. Both must be mirrored here exactly, or
+        // a following source reads as permanently silent even while it is
+        // actively routing audio.
+        if source.followsSystemOutput, let def = systemAudio.defaultOutputUID {
+            switch source.kind {
+            case .device: return router.levels[source.id] ?? .silent
+            case .app(let bundleID): return appRedirectEngine.levels["\(bundleID)|\(def)"] ?? .silent
+            }
+        }
         switch source.kind {
         case .device:
             let ids = connections.filter { $0.sourceID == source.id }.map { $0.id }
             return AudioMeter.combine(ids.compactMap { router.levels[$0] })
         case .app(let bundleID):
-            if source.followsSystemOutput, let def = systemAudio.defaultOutputUID {
-                return appRedirectEngine.levels["\(bundleID)|\(def)"] ?? .silent
-            }
             let outs = connectedOutputs(for: source.id).map { $0.uid }
             let keys = outs.map { "\(bundleID)|\($0)" }
             return AudioMeter.combine(keys.compactMap { appRedirectEngine.levels[$0] })
         }
     }
 
-    /// Live level for one output, combining every source feeding it.
+    /// Live level for one output, combining every source feeding it. Mirrors
+    /// the same follow-mode routing key as meterReading(for source:) above.
     func meterReading(for output: OutputTarget) -> MeterReading {
         var readings: [MeterReading] = []
+        // Manually connected device routes: keyed by Connection id.
         for conn in connections where conn.outputID == output.id {
             if let r = router.levels[conn.id] { readings.append(r) }
         }
         for source in inputs {
-            guard case .app(let bundleID) = source.kind else { continue }
             let connectedToThis = source.followsSystemOutput
                 ? systemAudio.defaultOutputUID == output.uid
                 : connections.contains { $0.sourceID == source.id && $0.outputID == output.id }
             guard connectedToThis else { continue }
-            if let r = appRedirectEngine.levels["\(bundleID)|\(output.uid)"] { readings.append(r) }
+            switch source.kind {
+            case .device:
+                // A non-following device route was already counted above via
+                // its Connection id; only the follow-mode case (keyed by the
+                // source's own id, no Connection involved) needs this lookup.
+                if source.followsSystemOutput, let r = router.levels[source.id] { readings.append(r) }
+            case .app(let bundleID):
+                if let r = appRedirectEngine.levels["\(bundleID)|\(output.uid)"] { readings.append(r) }
+            }
         }
         return AudioMeter.combine(readings)
     }
@@ -304,7 +337,14 @@ final class MixerStore: ObservableObject {
     }
 
     func toggleFavorite(_ sourceID: UUID) { updateInput(sourceID) { $0.isFavorite.toggle() } }
-    func toggleFollowOutput(_ sourceID: UUID) { updateInput(sourceID) { $0.followsSystemOutput.toggle() } }
+    func toggleFollowOutput(_ sourceID: UUID) {
+        var nowFollowing = false
+        updateInput(sourceID) { $0.followsSystemOutput.toggle(); nowFollowing = $0.followsSystemOutput }
+        // See the matching note in connect(sourceID:outputID:): keep manual
+        // connections and follow mode mutually exclusive, so the canvas never
+        // shows a cable that is not where audio is actually going.
+        if nowFollowing { clearRoutes(for: sourceID) }
+    }
 
     /// Inputs with favorites first (used by the menu bar list).
     var inputsFavoritesFirst: [InputSource] {
@@ -429,6 +469,7 @@ final class MixerStore: ObservableObject {
 
     func subtitle(for source: InputSource) -> String {
         if !isActive(source) { return "Inactive" }
+        if source.followsSystemOutput { return "Following system output" }
         switch source.kind {
         case .device: return "Input device"
         case .app: return "Application"

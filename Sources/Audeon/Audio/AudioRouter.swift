@@ -48,10 +48,18 @@ final class AudioRouter: ObservableObject {
                   let outID = deviceManager.deviceID(forUID: route.outputDeviceUID) else { continue }
 
             if let engine = engines[route.id],
-               engine.inputDeviceUID == route.inputDeviceUID, engine.outputDeviceUID == route.outputDeviceUID {
+               engine.inputDeviceUID == route.inputDeviceUID, engine.outputDeviceUID == route.outputDeviceUID,
+               engine.inputDeviceID == inID, engine.outputDeviceID == outID {
                 engine.configure(route)
             } else {
+                // Tear down whatever was here (a stale or mismatched engine,
+                // or nothing) and clear the slot before attempting the new
+                // one. If the new engine fails to start, this route must end
+                // up with no entry, not a leftover stopped engine: a stale
+                // entry could later "match" a route that reverts to the same
+                // device pair and silently look connected while being dead.
                 engines[route.id]?.stop()
+                engines[route.id] = nil
                 let id = route.id
                 let engine = RouteEngine(
                     inputDeviceUID: route.inputDeviceUID, inputDeviceID: inID,
@@ -102,8 +110,13 @@ final class AudioRouter: ObservableObject {
 private final class RouteEngine {
     let inputDeviceUID: String
     let outputDeviceUID: String
-    private let inputDeviceID: AudioDeviceID
-    private let outputDeviceID: AudioDeviceID
+    // The resolved AudioDeviceID at the moment this engine was bound. A UID
+    // is stable across unplug and replug, but CoreAudio commonly assigns a
+    // new numeric AudioDeviceID on reconnect; the bound AVAudioEngine still
+    // points at the old, now-dead ID. apply() must rebuild in that case
+    // rather than treat a same-UID device as unchanged.
+    let inputDeviceID: AudioDeviceID
+    let outputDeviceID: AudioDeviceID
 
     private let engine = AVAudioEngine()
     private let eq = AVAudioUnitEQ(numberOfBands: AudioEQ.bandCount)
@@ -132,6 +145,21 @@ private final class RouteEngine {
     }
 
     func start(_ route: Route) throws {
+        // If anything below throws after the aggregate device is created, the
+        // aggregate must still be torn down here. The instance itself may be
+        // discarded immediately by the caller on failure (it is never stored
+        // in AudioRouter.engines on a thrown error), and waiting on ARC/deinit
+        // timing for a CoreAudio system resource is fragile to reason about,
+        // so clean up explicitly before rethrowing.
+        do {
+            try startUnsafe(route)
+        } catch {
+            stop()
+            throw error
+        }
+    }
+
+    private func startUnsafe(_ route: Route) throws {
         // Input and output device are the same hardware: bind directly, no
         // aggregate needed, and no cross-clock drift to compensate for.
         if inputDeviceUID == outputDeviceUID {
