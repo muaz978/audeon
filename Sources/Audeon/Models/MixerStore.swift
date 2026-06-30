@@ -151,22 +151,27 @@ final class MixerStore: ObservableObject {
         outputs.insert(item, at: min(insert, outputs.count))
     }
 
-    /// Live reorder driven by a drag handle: move the dragged card next to
-    /// whichever card's pin is nearest the pointer's vertical position.
+    /// Live reorder driven by a drag handle. The target index is the number of
+    /// other cards whose pin sits above the pointer, which is stable as the
+    /// pointer moves (no oscillation or flicker between adjacent slots).
     func reorderInput(_ draggedID: UUID, toNearY y: CGFloat) {
-        guard let target = inputs
-            .filter({ $0.id != draggedID && pinFrames[$0.pinKey] != nil })
-            .min(by: { abs((pinFrames[$0.pinKey]!.y) - y) < abs((pinFrames[$1.pinKey]!.y) - y) })
-        else { return }
-        moveInput(id: draggedID, before: target.id)
+        let others = inputs.filter { $0.id != draggedID }
+        let targetIndex = others.filter { (pinFrames[$0.pinKey]?.y ?? .greatestFiniteMagnitude) < y }.count
+        guard let from = inputs.firstIndex(where: { $0.id == draggedID }) else { return }
+        var arr = inputs
+        let item = arr.remove(at: from)
+        arr.insert(item, at: min(targetIndex, arr.count))
+        if arr != inputs { inputs = arr }
     }
 
     func reorderOutput(_ draggedID: UUID, toNearY y: CGFloat) {
-        guard let target = outputs
-            .filter({ $0.id != draggedID && pinFrames[$0.pinKey] != nil })
-            .min(by: { abs((pinFrames[$0.pinKey]!.y) - y) < abs((pinFrames[$1.pinKey]!.y) - y) })
-        else { return }
-        moveOutput(id: draggedID, before: target.id)
+        let others = outputs.filter { $0.id != draggedID }
+        let targetIndex = others.filter { (pinFrames[$0.pinKey]?.y ?? .greatestFiniteMagnitude) < y }.count
+        guard let from = outputs.firstIndex(where: { $0.id == draggedID }) else { return }
+        var arr = outputs
+        let item = arr.remove(at: from)
+        arr.insert(item, at: min(targetIndex, arr.count))
+        if arr != outputs { outputs = arr }
     }
 
     // MARK: - EQ and boost

@@ -26,9 +26,12 @@ struct AudeonApp: App {
             }
         }
 
-        // Compact control panel in the menu bar.
-        MenuBarExtra("Audeon", systemImage: "slider.horizontal.3") {
-            MenuBarPanel().environmentObject(store)
+        // Compact control panel in the menu bar (window style so sliders,
+        // toggles, and the scroll view render; menu style would drop them).
+        MenuBarExtra {
+            MenuBarPanel(store: store)
+        } label: {
+            Image(systemName: "slider.horizontal.3")
         }
         .menuBarExtraStyle(.window)
     }
@@ -37,7 +40,7 @@ struct AudeonApp: App {
 /// A compact window-style menu bar panel mirroring the main quick controls:
 /// per input volume, mute, boost, and EQ toggle.
 private struct MenuBarPanel: View {
-    @EnvironmentObject var store: MixerStore
+    @ObservedObject var store: MixerStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {

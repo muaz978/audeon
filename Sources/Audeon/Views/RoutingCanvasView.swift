@@ -30,8 +30,8 @@ struct RoutingCanvasView: View {
             }
             .coordinateSpace(name: "canvas")
             .onPreferenceChange(PinFramesKey.self) { store.pinFrames = $0 }
-            .animation(.spring(response: 0.35, dampingFraction: 0.85), value: store.inputs)
-            .animation(.spring(response: 0.35, dampingFraction: 0.85), value: store.outputs)
+            .animation(.spring(response: 0.22, dampingFraction: 0.9), value: store.inputs)
+            .animation(.spring(response: 0.22, dampingFraction: 0.9), value: store.outputs)
             .animation(.easeInOut(duration: 0.2), value: store.connections)
             .animation(.easeInOut(duration: 0.2), value: store.hideInactiveApps)
         }
@@ -162,8 +162,8 @@ private struct DragHandle: View {
             .gesture(
                 DragGesture(minimumDistance: 3, coordinateSpace: .named("canvas"))
                     .onChanged { v in
-                        store.draggingCardID = cardID
-                        withAnimation(.easeInOut(duration: 0.15)) { reorder(cardID, v.location.y) }
+                        if store.draggingCardID != cardID { store.draggingCardID = cardID }
+                        reorder(cardID, v.location.y)   // array-change animation handled by the canvas
                     }
                     .onEnded { _ in store.draggingCardID = nil }
             )
