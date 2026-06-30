@@ -31,6 +31,7 @@ struct RoutingCanvasView: View {
                         if store.outputs.isEmpty { placeholder("Use Add output to add a device.") }
                     }
                 }
+                ConnectionDeleteControl()
             }
             .coordinateSpace(name: "canvas")
             .onPreferenceChange(PinFramesKey.self) { store.pinFrames = $0 }
@@ -104,6 +105,22 @@ struct RoutingCanvasView: View {
 
 // MARK: - Cables
 
+/// The bezier cable as a Shape, so its stroked region can be both drawn and
+/// (when widened) used as a hit area for clicking a specific cable.
+private struct CableShape: Shape {
+    let p1: CGPoint
+    let p2: CGPoint
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let dx = (p2.x - p1.x) * 0.5
+        path.move(to: p1)
+        path.addCurve(to: p2,
+                      control1: CGPoint(x: p1.x + dx, y: p1.y),
+                      control2: CGPoint(x: p2.x - dx, y: p2.y))
+        return path
+    }
+}
+
 private struct CableLayer: View {
     @EnvironmentObject var store: MixerStore
 
@@ -114,32 +131,65 @@ private struct CableLayer: View {
                    let output = store.outputs.first(where: { $0.id == conn.outputID }),
                    let p1 = store.pinFrames[source.pinKey],
                    let p2 = store.pinFrames[output.pinKey] {
-                    cable(p1, p2)
-                        .stroke(store.color(forPin: source.pinKey).color.opacity(0.9),
-                                style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                    let selected = store.selectedConnectionID == conn.id
+                    let color = store.color(forPin: source.pinKey).color
+                    ZStack {
+                        // Visible cable.
+                        CableShape(p1: p1, p2: p2)
+                            .stroke(color.opacity(selected ? 1 : 0.9),
+                                    style: StrokeStyle(lineWidth: selected ? 5 : 3, lineCap: .round))
+                            .allowsHitTesting(false)
+                        // Wide invisible hit area so the thin line is easy to click.
+                        CableShape(p1: p1, p2: p2)
+                            .stroke(Color.white.opacity(0.001),
+                                    style: StrokeStyle(lineWidth: 22, lineCap: .round))
+                            .contentShape(
+                                CableShape(p1: p1, p2: p2)
+                                    .stroke(style: StrokeStyle(lineWidth: 22, lineCap: .round))
+                            )
+                            .onTapGesture { store.selectedConnectionID = conn.id }
+                    }
                 }
             }
-            // Live drag cable.
+            // Live drag cable (not interactive).
             if let sid = store.dragSourceID,
                let source = store.inputs.first(where: { $0.id == sid }),
                let p1 = store.pinFrames[source.pinKey],
                let p2 = store.dragPoint {
-                cable(p1, p2)
+                CableShape(p1: p1, p2: p2)
                     .stroke(store.color(forPin: source.pinKey).color.opacity(0.6),
                             style: StrokeStyle(lineWidth: 3, lineCap: .round, dash: [6, 5]))
+                    .allowsHitTesting(false)
             }
         }
-        .allowsHitTesting(false)
     }
+}
 
-    private func cable(_ p1: CGPoint, _ p2: CGPoint) -> Path {
-        var path = Path()
-        let dx = (p2.x - p1.x) * 0.5
-        path.move(to: p1)
-        path.addCurve(to: p2,
-                      control1: CGPoint(x: p1.x + dx, y: p1.y),
-                      control2: CGPoint(x: p2.x - dx, y: p2.y))
-        return path
+/// The Delete / Cancel control shown at the midpoint of the selected cable.
+private struct ConnectionDeleteControl: View {
+    @EnvironmentObject var store: MixerStore
+
+    var body: some View {
+        if let id = store.selectedConnectionID,
+           let conn = store.connections.first(where: { $0.id == id }),
+           let source = store.inputs.first(where: { $0.id == conn.sourceID }),
+           let output = store.outputs.first(where: { $0.id == conn.outputID }),
+           let p1 = store.pinFrames[source.pinKey],
+           let p2 = store.pinFrames[output.pinKey] {
+            let mid = CGPoint(x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2)
+            HStack(spacing: 8) {
+                Button(role: .destructive) { store.disconnect(id) } label: {
+                    Label("Delete", systemImage: "scissors")
+                }
+                Button("Cancel") { store.selectedConnectionID = nil }
+            }
+            .controlSize(.small)
+            .padding(8)
+            .background(RoundedRectangle(cornerRadius: 10).fill(.regularMaterial))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.primary.opacity(0.15)))
+            .shadow(radius: 6, y: 2)
+            .position(mid)
+        }
     }
 }
 

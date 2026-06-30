@@ -20,6 +20,9 @@ final class MixerStore: ObservableObject {
 
     @Published var showSettings: Bool = false
 
+    /// The cable the user clicked, showing its delete control.
+    @Published var selectedConnectionID: UUID?
+
     let deviceManager: AudioDeviceManager
     let router: AudioRouter
     let systemAudio: SystemAudioController
@@ -92,7 +95,10 @@ final class MixerStore: ObservableObject {
         connections.append(Connection(sourceID: sourceID, outputID: outputID))
     }
 
-    func disconnect(_ id: UUID) { connections.removeAll { $0.id == id } }
+    func disconnect(_ id: UUID) {
+        connections.removeAll { $0.id == id }
+        if selectedConnectionID == id { selectedConnectionID = nil }
+    }
 
     // MARK: - Per-card controls
 
