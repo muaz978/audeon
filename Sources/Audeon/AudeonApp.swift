@@ -26,29 +26,57 @@ struct AudeonApp: App {
             }
         }
 
-        // Compact control panel in the menu bar (window style so sliders,
-        // toggles, and the scroll view render; menu style would drop them).
-        MenuBarExtra {
-            MenuBarPanel(store: store)
-        } label: {
-            Image(systemName: "slider.horizontal.3")
+        // A real window for the quick controls. Windows observe the shared store
+        // reliably, unlike a MenuBarExtra window-style panel.
+        Window("Quick Controls", id: "quickControls") {
+            QuickControlsView()
+                .environmentObject(store)
         }
-        .menuBarExtraStyle(.window)
+        .windowResizability(.contentSize)
+        .defaultPosition(.topTrailing)
+
+        // The menu bar item is a plain menu (always reliable) that opens the
+        // quick controls window or the main window.
+        MenuBarExtra("Audeon", systemImage: "slider.horizontal.3") {
+            MenuBarMenu()
+        }
     }
 }
 
-/// A compact window-style menu bar panel mirroring the main quick controls:
-/// per input volume, mute, boost, and EQ toggle.
-private struct MenuBarPanel: View {
-    @ObservedObject var store: MixerStore
+/// The menu shown from the menu bar icon. Plain buttons, which always render.
+private struct MenuBarMenu: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Quick Controls...") {
+            openWindow(id: "quickControls")
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        Button("Open Audeon") { NSApp.activate(ignoringOtherApps: true) }
+        Divider()
+        Button("Refresh Devices & Apps") {
+            MixerStore.shared.deviceManager.refresh()
+            MixerStore.shared.appManager.refresh()
+        }
+        Divider()
+        Button("Quit Audeon") { NSApplication.shared.terminate(nil) }
+    }
+}
+
+/// Compact quick-controls window mirroring the main controls: per input and
+/// output volume and mute, plus boost and EQ for inputs.
+private struct QuickControlsView: View {
+    @EnvironmentObject var store: MixerStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Image(systemName: "slider.horizontal.3")
-                Text("Audeon").font(.headline)
+                Text("Quick Controls").font(.headline)
                 Spacer()
-                Button("Open") { NSApp.activate(ignoringOtherApps: true) }.controlSize(.small)
+                Button { NSApp.activate(ignoringOtherApps: true) } label: {
+                    Image(systemName: "macwindow")
+                }.help("Open the main window")
             }
             Divider()
             if store.inputs.isEmpty && store.outputs.isEmpty {
@@ -56,22 +84,21 @@ private struct MenuBarPanel: View {
                     Text("Nothing added yet").font(.subheadline.weight(.medium))
                     Text("Open Audeon and use Add input or Add output.")
                         .font(.caption).foregroundStyle(.secondary)
-                }
-                .padding(.vertical, 6)
+                }.padding(.vertical, 6)
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
                         if !store.inputs.isEmpty {
                             Text("INPUTS").font(.caption2.bold()).foregroundStyle(.secondary)
-                            ForEach(store.inputs) { source in inputRow(source) }
+                            ForEach(store.inputs) { inputRow($0) }
                         }
                         if !store.outputs.isEmpty {
                             Text("OUTPUTS").font(.caption2.bold()).foregroundStyle(.secondary)
-                            ForEach(store.outputs) { output in outputRow(output) }
+                            ForEach(store.outputs) { outputRow($0) }
                         }
                     }
                 }
-                .frame(maxHeight: 360)
+                .frame(maxHeight: 420)
             }
             Divider()
             HStack {

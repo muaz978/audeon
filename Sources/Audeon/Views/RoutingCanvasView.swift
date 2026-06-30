@@ -30,8 +30,8 @@ struct RoutingCanvasView: View {
             }
             .coordinateSpace(name: "canvas")
             .onPreferenceChange(PinFramesKey.self) { store.pinFrames = $0 }
-            .animation(.spring(response: 0.22, dampingFraction: 0.9), value: store.inputs)
-            .animation(.spring(response: 0.22, dampingFraction: 0.9), value: store.outputs)
+            .animation(.snappy(duration: 0.16), value: store.inputs)
+            .animation(.snappy(duration: 0.16), value: store.outputs)
             .animation(.easeInOut(duration: 0.2), value: store.connections)
             .animation(.easeInOut(duration: 0.2), value: store.hideInactiveApps)
         }
@@ -145,28 +145,38 @@ struct RoutingCanvasView: View {
     }
 }
 
-// MARK: - Drag handle for reordering
+// MARK: - Reordering
 
-private struct DragHandle: View {
+/// A small grip icon shown only as a drag affordance. The whole card is draggable.
+private struct GripIcon: View {
+    var body: some View {
+        Image(systemName: "line.3.horizontal").font(.system(size: 13)).foregroundStyle(.tertiary)
+    }
+}
+
+/// Makes the whole card draggable for reordering. A minimum distance keeps
+/// clicks on buttons and sliders working; only an actual drag reorders, and a
+/// drag that begins on a slider is consumed by the slider as expected.
+private struct ReorderDraggable: ViewModifier {
     @EnvironmentObject var store: MixerStore
-    let cardID: UUID
+    let id: UUID
     let reorder: (UUID, CGFloat) -> Void
 
-    var body: some View {
-        Image(systemName: "line.3.horizontal")
-            .font(.system(size: 13))
-            .foregroundStyle(.secondary)
-            .padding(4)
-            .contentShape(Rectangle())
-            .help("Drag to reorder")
-            .gesture(
-                DragGesture(minimumDistance: 3, coordinateSpace: .named("canvas"))
-                    .onChanged { v in
-                        if store.draggingCardID != cardID { store.draggingCardID = cardID }
-                        reorder(cardID, v.location.y)   // array-change animation handled by the canvas
-                    }
-                    .onEnded { _ in store.draggingCardID = nil }
-            )
+    func body(content: Content) -> some View {
+        content.gesture(
+            DragGesture(minimumDistance: 8, coordinateSpace: .named("canvas"))
+                .onChanged { v in
+                    if store.draggingCardID != id { store.draggingCardID = id }
+                    reorder(id, v.location.y)
+                }
+                .onEnded { _ in store.draggingCardID = nil }
+        )
+    }
+}
+
+private extension View {
+    func reorderDraggable(id: UUID, reorder: @escaping (UUID, CGFloat) -> Void) -> some View {
+        modifier(ReorderDraggable(id: id, reorder: reorder))
     }
 }
 
@@ -300,6 +310,8 @@ private struct InputCard: View {
                 .strokeBorder(color.opacity(active ? 0.4 : 0.2),
                               style: StrokeStyle(lineWidth: 1, dash: active ? [] : [4, 3])))
             .frame(width: cardWidth)
+            .contentShape(Rectangle())
+            .reorderDraggable(id: source.id) { store.reorderInput($0, toNearY: $1) }
 
             Pin(key: source.pinKey, color: color,
                 highlighted: store.pendingSourceID == source.id || store.dragSourceID == source.id,
@@ -313,7 +325,7 @@ private struct InputCard: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            DragHandle(cardID: source.id) { store.reorderInput($0, toNearY: $1) }
+            GripIcon()
             icon
             VStack(alignment: .leading, spacing: 2) {
                 Text(store.title(for: source)).font(.system(size: 15, weight: .semibold))
@@ -463,7 +475,7 @@ private struct OutputCard: View {
                 .onTapGesture { store.handleOutputPinTap(output.id) }
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
-                    DragHandle(cardID: output.id) { store.reorderOutput($0, toNearY: $1) }
+                    GripIcon()
                     Image(systemName: "hifispeaker.fill").font(.system(size: 16)).frame(width: 26, height: 26).foregroundStyle(color)
                     Text(name).font(.system(size: 15, weight: .semibold))
                         .lineLimit(1).truncationMode(.tail)
@@ -488,6 +500,8 @@ private struct OutputCard: View {
             .background(RoundedRectangle(cornerRadius: 14).fill(color.opacity(0.14)))
             .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(color.opacity(0.4)))
             .frame(width: cardWidth)
+            .contentShape(Rectangle())
+            .reorderDraggable(id: output.id) { store.reorderOutput($0, toNearY: $1) }
         }
     }
 
