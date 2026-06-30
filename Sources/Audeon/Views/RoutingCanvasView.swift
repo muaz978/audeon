@@ -316,7 +316,8 @@ private struct InputCard: View {
             DragHandle(cardID: source.id) { store.reorderInput($0, toNearY: $1) }
             icon
             VStack(alignment: .leading, spacing: 2) {
-                Text(store.title(for: source)).font(.system(size: 15, weight: .semibold)).lineLimit(1)
+                Text(store.title(for: source)).font(.system(size: 15, weight: .semibold))
+                    .lineLimit(1).truncationMode(.tail)
                 HStack(spacing: 4) {
                     if !active {
                         Image(systemName: "moon.zzz.fill").font(.system(size: 9)).foregroundStyle(.orange)
@@ -326,7 +327,7 @@ private struct InputCard: View {
                         .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
-            Spacer()
+            .frame(maxWidth: .infinity, alignment: .leading)
             Button { withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() } } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 14))
@@ -464,8 +465,9 @@ private struct OutputCard: View {
                 HStack(spacing: 10) {
                     DragHandle(cardID: output.id) { store.reorderOutput($0, toNearY: $1) }
                     Image(systemName: "hifispeaker.fill").font(.system(size: 16)).frame(width: 26, height: 26).foregroundStyle(color)
-                    Text(name).font(.system(size: 15, weight: .semibold)).lineLimit(1)
-                    Spacer()
+                    Text(name).font(.system(size: 15, weight: .semibold))
+                        .lineLimit(1).truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     colorMenu
                     Button { withAnimation { store.removeOutput(output.id) } } label: {
                         Image(systemName: "xmark.circle.fill").font(.system(size: 16)).foregroundStyle(.secondary)

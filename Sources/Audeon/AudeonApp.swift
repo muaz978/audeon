@@ -51,20 +51,27 @@ private struct MenuBarPanel: View {
                 Button("Open") { NSApp.activate(ignoringOtherApps: true) }.controlSize(.small)
             }
             Divider()
-            if store.inputs.isEmpty {
+            if store.inputs.isEmpty && store.outputs.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("No inputs yet").font(.subheadline.weight(.medium))
-                    Text("Open Audeon and use Add input to route a device or app.")
+                    Text("Nothing added yet").font(.subheadline.weight(.medium))
+                    Text("Open Audeon and use Add input or Add output.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(.vertical, 6)
             } else {
                 ScrollView {
-                    VStack(spacing: 12) {
-                        ForEach(store.inputs) { source in inputRow(source) }
+                    VStack(alignment: .leading, spacing: 12) {
+                        if !store.inputs.isEmpty {
+                            Text("INPUTS").font(.caption2.bold()).foregroundStyle(.secondary)
+                            ForEach(store.inputs) { source in inputRow(source) }
+                        }
+                        if !store.outputs.isEmpty {
+                            Text("OUTPUTS").font(.caption2.bold()).foregroundStyle(.secondary)
+                            ForEach(store.outputs) { output in outputRow(output) }
+                        }
                     }
                 }
-                .frame(maxHeight: 320)
+                .frame(maxHeight: 360)
             }
             Divider()
             HStack {
@@ -113,6 +120,29 @@ private struct MenuBarPanel: View {
                 Spacer()
                 Toggle("EQ", isOn: Binding(get: { source.eqEnabled }, set: { _ in store.toggleEQ(for: source.id) }))
                     .toggleStyle(.switch).controlSize(.mini).font(.system(size: 10))
+            }
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 8).fill(color.opacity(0.10)))
+    }
+
+    @ViewBuilder
+    private func outputRow(_ output: OutputTarget) -> some View {
+        let color = store.color(forPin: output.pinKey).color
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Image(systemName: "hifispeaker.fill").font(.system(size: 11)).foregroundStyle(color)
+                Text(store.deviceManager.endpoint(forUID: output.uid)?.name ?? "Output")
+                    .font(.system(size: 13, weight: .medium)).lineLimit(1)
+            }
+            HStack(spacing: 8) {
+                Button { store.updateOutput(output.id) { $0.isMuted.toggle() } } label: {
+                    Image(systemName: output.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .foregroundStyle(output.isMuted ? .red : .primary)
+                }.buttonStyle(.borderless)
+                Slider(value: Binding(get: { output.volume },
+                                      set: { v in store.updateOutput(output.id) { $0.volume = v } }), in: 0...1)
+                .controlSize(.small)
             }
         }
         .padding(8)
