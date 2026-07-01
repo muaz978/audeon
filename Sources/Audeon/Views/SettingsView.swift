@@ -11,7 +11,7 @@ struct SettingsView: View {
             AppearanceTab().tabItem { Label("Appearance", systemImage: "eye") }
             AudioTab().tabItem { Label("Audio", systemImage: "hifispeaker") }
         }
-        .frame(width: 480, height: 460)
+        .frame(width: 540, height: 580)
     }
 }
 
@@ -35,9 +35,15 @@ private struct DevicesTab: View {
 
     var body: some View {
         Form {
-            Picker("Device", selection: $selectedUID) {
-                Text("Choose...").tag(String?.none)
-                ForEach(devices) { Text($0.name).tag(String?.some($0.uid)) }
+            Section {
+                Picker("Device", selection: $selectedUID) {
+                    Text("Choose a device...").tag(String?.none)
+                    ForEach(devices) { Text($0.name).tag(String?.some($0.uid)) }
+                }
+                if selectedUID != nil {
+                    Text("Balance, a maximum volume cap, and custom icons are not available yet.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             if let uid = selectedUID, let entry = devices.first(where: { $0.uid == uid }) {
                 detail(entry)
@@ -53,24 +59,23 @@ private struct DevicesTab: View {
         Section("General") {
             TextField("Nickname", text: Binding(
                 get: { store.deviceNicknames[entry.uid] ?? "" },
-                set: { store.setNickname($0, forUID: entry.uid) }))
-            Text("Original name: \(entry.name)").font(.caption).foregroundStyle(.secondary)
+                set: { store.setNickname($0, forUID: entry.uid) }),
+                prompt: Text(entry.name))
+            LabeledContent("Original name", value: entry.name)
+                .font(.caption).foregroundStyle(.secondary)
         }
         if entry.isOutput {
             Section("Output") {
                 volumeRow(uid: entry.uid, scope: .output)
                 sampleRateRow(uid: entry.uid)
-                channelRow(uid: entry.uid)
+                channelPicker("Left Channel", uid: entry.uid, isLeft: true)
+                channelPicker("Right Channel", uid: entry.uid, isLeft: false)
             }
         }
         if entry.isInput {
             Section("Input") {
                 volumeRow(uid: entry.uid, scope: .input)
             }
-        }
-        Section {
-            Text("Balance, a maximum-volume cap, and custom icons are not available yet.")
-                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -102,24 +107,18 @@ private struct DevicesTab: View {
         }
     }
 
-    @ViewBuilder
-    private func channelRow(uid: String) -> some View {
+    /// A full-width Left/Right Channel row, matching the shape of the other
+    /// rows in this form instead of a cramped side-by-side pair.
+    private func channelPicker(_ title: String, uid: String, isLeft: Bool) -> some View {
         let count = max(2, store.deviceManager.outputChannelCount(forUID: uid))
         let pref = store.deviceManager.preferredStereoChannels(forUID: uid) ?? (1, 2)
-        HStack {
-            Text("Left Channel")
-            Picker("", selection: Binding(
-                get: { pref.left },
-                set: { store.deviceManager.setPreferredStereoChannels(left: $0, right: pref.right, forUID: uid) })) {
-                ForEach(1...count, id: \.self) { Text("\($0)").tag($0) }
-            }.labelsHidden().frame(width: 70)
-            Spacer()
-            Text("Right Channel")
-            Picker("", selection: Binding(
-                get: { pref.right },
-                set: { store.deviceManager.setPreferredStereoChannels(left: pref.left, right: $0, forUID: uid) })) {
-                ForEach(1...count, id: \.self) { Text("\($0)").tag($0) }
-            }.labelsHidden().frame(width: 70)
+        return Picker(title, selection: Binding(
+            get: { isLeft ? pref.left : pref.right },
+            set: { newValue in
+                if isLeft { store.deviceManager.setPreferredStereoChannels(left: newValue, right: pref.right, forUID: uid) }
+                else { store.deviceManager.setPreferredStereoChannels(left: pref.left, right: newValue, forUID: uid) }
+            })) {
+            ForEach(1...count, id: \.self) { Text("\($0)").tag($0) }
         }
     }
 }
