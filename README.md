@@ -183,9 +183,11 @@ Still planned, in rough priority order:
    primitive already used for per-app capture) instead of binding
    AVAudioEngine's shared input/output unit to the aggregate.
 2. Output Groups, so one app can play to several devices at once.
-3. Present Audeon as a virtual device for OBS, Streamlabs, and Discord, via an
-   AudioServerPlugIn driver or by supporting the open source BlackHole driver
-   (the onboarding screen already detects BlackHole if installed).
+3. Present Audeon as a virtual device for OBS, Streamlabs, and Discord. In
+   progress in `Driver/`: an AudioServerPlugIn built on the BlackHole source
+   (GPL-3.0, see `Driver/README.md`), currently at Stage 0 of a staged safety
+   plan (in-process tests only, nothing installed). Until it ships, the
+   onboarding screen detects and recommends the BlackHole driver itself.
 4. Recording a mix to a file, reusing the existing tap pipeline.
 5. Super volume keys and a global show or hide shortcut, both opt in and both
    needing Accessibility access.
