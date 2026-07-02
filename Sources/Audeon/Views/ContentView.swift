@@ -90,6 +90,14 @@ struct ContentView: View {
                     NSWorkspace.shared.open(url)
                 }
             }
+            Button("Capture System Audio (via BlackHole)") {
+                if !store.captureSystemAudio() {
+                    let alert = NSAlert()
+                    alert.messageText = "BlackHole not found"
+                    alert.informativeText = "Install the free BlackHole driver first, then try again. See Settings > General > Show Welcome & Permissions for a link."
+                    alert.runModal()
+                }
+            }
             Divider()
             Button("Quit Audeon") { NSApplication.shared.terminate(nil) }
                 .keyboardShortcut("q", modifiers: .command)

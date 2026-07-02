@@ -131,6 +131,26 @@ final class MixerStore: ObservableObject {
         inputs.append(InputSource(kind: .app(bundleID), displayName: name))
     }
 
+    /// The MixLine/Voicemeeter-style workflow: set a virtual sink device as
+    /// the system default output, so everything the Mac plays lands in it,
+    /// then bring it into Audeon as a single labeled "System Audio" input
+    /// ready to route anywhere. Works with BlackHole today since it is a
+    /// free, already-signed virtual device; the same helper will work with a
+    /// future Audeon-branded virtual device without any call site changes.
+    @discardableResult
+    func captureSystemAudio(usingOutputNamed nameContains: String = "blackhole",
+                            label: String = "System Audio") -> Bool {
+        guard let sink = deviceManager.outputs.first(where: {
+            $0.name.localizedCaseInsensitiveContains(nameContains)
+        }) else { return false }
+        systemAudio.setDefaultOutput(sink.uid)
+        if !inputs.contains(where: { $0.kind == .device(sink.uid) }) {
+            addDeviceInput(uid: sink.uid)
+        }
+        setNickname(label, forUID: sink.uid)
+        return true
+    }
+
     /// An app source is active when its process is running; a device source when
     /// the device is present. Inactive cards stay on the canvas and reconnect
     /// automatically when the app reopens or the device returns.

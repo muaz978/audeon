@@ -7,6 +7,7 @@ import AVFoundation
 struct OnboardingView: View {
     @EnvironmentObject var store: MixerStore
     @State private var recheck = false   // toggling re-reads live status
+    @State private var captureMessage: String?
 
     private var micGranted: Bool {
         _ = recheck
@@ -49,7 +50,13 @@ struct OnboardingView: View {
                     : "To send audio into OBS, Discord, or Zoom, install the free BlackHole driver, then route apps to it.",
                 enabled: blackHoleInstalled,
                 action: blackHoleInstalled ? nil : { open("https://existential.audio/blackhole/") },
-                actionTitle: "Get BlackHole")
+                actionTitle: "Get BlackHole",
+                secondaryAction: blackHoleInstalled ? { captureSystemAudio() } : nil,
+                secondaryActionTitle: "Capture System Audio")
+
+            if captureMessage != nil {
+                Text(captureMessage!).font(.caption).foregroundStyle(.green)
+            }
 
             HStack {
                 Button("Recheck") { recheck.toggle(); store.deviceManager.refresh() }
@@ -63,7 +70,8 @@ struct OnboardingView: View {
     }
 
     private func permissionCard(icon: String, title: String, tag: String, detail: String,
-                                enabled: Bool, action: (() -> Void)?, actionTitle: String) -> some View {
+                                enabled: Bool, action: (() -> Void)?, actionTitle: String,
+                                secondaryAction: (() -> Void)? = nil, secondaryActionTitle: String = "") -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: icon).font(.system(size: 20)).frame(width: 28).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 4) {
@@ -75,18 +83,29 @@ struct OnboardingView: View {
                         .background(Capsule().fill(Color.secondary.opacity(0.2)))
                 }
                 Text(detail).font(.caption).foregroundStyle(.secondary)
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     if enabled {
                         Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                         Text("Enabled").font(.caption).foregroundStyle(.green)
                     } else if let action {
                         Button(actionTitle, action: action).controlSize(.small)
                     }
+                    if let secondaryAction {
+                        Button(secondaryActionTitle, action: secondaryAction).controlSize(.small)
+                    }
                 }
             }
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.primary.opacity(0.06)))
+    }
+
+    /// Wraps MixerStore.captureSystemAudio with UI feedback for this screen.
+    private func captureSystemAudio() {
+        let ok = store.captureSystemAudio()
+        captureMessage = ok
+            ? "Done. BlackHole is now your system output and appears in Audeon as \"System Audio\". Route it to your speakers or headphones in the main window."
+            : "Could not find BlackHole. Make sure it finished installing, then click Recheck."
     }
 
     private func requestMic() {
