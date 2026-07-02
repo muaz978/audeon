@@ -59,6 +59,11 @@ final class AppRedirectEngine: ObservableObject {
         }
 
         for (k, w) in wanted where units[k] == nil {
+            // Same hardware-level wake as the device router: an output that
+            // has never been selected in System Settings can sit muted or at
+            // 0% volume with nothing in Audeon having touched it.
+            deviceManager.wakeOutputIfSilent(forUID: w.outputUID)
+
             if let unit = TapUnit(request: w, onLevel: { [weak self] reading in
                 DispatchQueue.main.async { self?.levels[k] = reading }
             }) {

@@ -521,6 +521,10 @@ private struct OutputCard: View {
 
     private var color: Color { store.color(forPin: output.pinKey).color }
     private var name: String { store.deviceManager.endpoint(forUID: output.uid)?.name ?? "Output" }
+    /// The device's own hardware volume/mute, independent of the route slider
+    /// below. A device nobody has ever selected in System Settings can sit
+    /// silent here with nothing Audeon does making a difference.
+    private var isHardwareSilent: Bool { store.deviceManager.isEffectivelySilent(forUID: output.uid) }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -534,6 +538,16 @@ private struct OutputCard: View {
                     Text(name).font(.system(size: 15, weight: .semibold))
                         .lineLimit(1).truncationMode(.tail)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    if isHardwareSilent {
+                        Button {
+                            store.deviceManager.wakeOutputIfSilent(forUID: output.uid)
+                        } label: {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 13)).foregroundStyle(.yellow)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("This device's own volume is muted or at 0%, outside of Audeon. Click to unmute and raise it.")
+                    }
                     colorMenu
                     Button { withAnimation { store.removeOutput(output.id) } } label: {
                         Image(systemName: "xmark.circle.fill").font(.system(size: 16)).foregroundStyle(.secondary)

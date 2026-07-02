@@ -60,6 +60,14 @@ final class AudioRouter: ObservableObject {
                 // device pair and silently look connected while being dead.
                 engines[route.id]?.stop()
                 engines[route.id] = nil
+
+                // A device that has never been selected in System Settings
+                // keeps whatever mute/volume state it last had, completely
+                // independent of anything in Audeon. Wake it once here so a
+                // freshly connected route is not silently muted at the
+                // hardware level before a single sample is ever sent to it.
+                deviceManager.wakeOutputIfSilent(forUID: route.outputDeviceUID)
+
                 let id = route.id
                 let engine = RouteEngine(
                     inputDeviceUID: route.inputDeviceUID, inputDeviceID: inID,

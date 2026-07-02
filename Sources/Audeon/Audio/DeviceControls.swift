@@ -29,6 +29,65 @@ extension AudioDeviceManager {
         }
     }
 
+    // MARK: - Mute (output scope)
+
+    /// The device's own hardware mute switch, independent of Audeon's per-route
+    /// volume. Every device that is not the current system default keeps
+    /// whatever mute/volume state it last had, which can easily be muted or at
+    /// 0% without anything in Audeon having touched it.
+    func isOutputMuted(forUID uid: String) -> Bool? {
+        guard let id = deviceID(forUID: uid) else { return nil }
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyMute,
+            mScope: kAudioObjectPropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectHasProperty(id, &addr) else { return nil }
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        var v: UInt32 = 0
+        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &v) == noErr else { return nil }
+        return v != 0
+    }
+
+    func setOutputMuted(_ muted: Bool, forUID uid: String) {
+        guard let id = deviceID(forUID: uid) else { return }
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyMute,
+            mScope: kAudioObjectPropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectHasProperty(id, &addr) else { return }
+        var v: UInt32 = muted ? 1 : 0
+        AudioObjectSetPropertyData(id, &addr, 0, nil, UInt32(MemoryLayout<UInt32>.size), &v)
+    }
+
+    /// True when this output device is effectively silent at the hardware
+    /// level: its own mute switch is on, or its own volume is at (or very
+    /// near) zero. This is independent of any route's volume slider in
+    /// Audeon, since it is a property of the device itself.
+    func isEffectivelySilent(forUID uid: String) -> Bool {
+        if isOutputMuted(forUID: uid) == true { return true }
+        if let v = outputVolume(forUID: uid) { return v <= 0.01 }
+        return false
+    }
+
+    /// Un-mutes the device and raises its volume to an audible default if it
+    /// is currently at (or very near) zero. Called once when a route or tap
+    /// starts targeting this output, so a device nobody has touched in
+    /// System Settings does not sit there silently muted forever. Never
+    /// lowers or otherwise overrides a volume the user has deliberately set.
+    @discardableResult
+    func wakeOutputIfSilent(forUID uid: String, to defaultVolume: Float = 0.7) -> Bool {
+        var changed = false
+        if isOutputMuted(forUID: uid) == true {
+            setOutputMuted(false, forUID: uid)
+            changed = true
+        }
+        if let v = outputVolume(forUID: uid), v <= 0.01 {
+            setOutputVolume(defaultVolume, forUID: uid)
+            changed = true
+        }
+        return changed
+    }
+
     private func volume(forUID uid: String, scope: AudioObjectPropertyScope) -> Float? {
         guard let id = deviceID(forUID: uid) else { return nil }
         if let v = Self.volume(id, element: kAudioObjectPropertyElementMain, scope: scope) { return v }
