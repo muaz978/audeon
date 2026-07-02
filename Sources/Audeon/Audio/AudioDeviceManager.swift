@@ -8,6 +8,13 @@ enum EndpointKind: String, Codable {
     case output
 }
 
+/// Identity of the Audeon virtual audio device (the installed HAL driver).
+/// Audio the Mac plays into this device is captured on its input side, which
+/// is how Audeon grabs whole-system audio and fans it back out to real
+/// outputs. Kept as constants so detection lives in one place.
+let audeonVirtualDeviceUID = "Audeon_UID"
+let audeonVirtualDeviceName = "Audeon Stream"
+
 /// A stable description of a CoreAudio device endpoint.
 /// We key everything off `uid` (a stable string) rather than the numeric
 /// AudioDeviceID, because device IDs can change across re-plug/reboot.
@@ -55,6 +62,21 @@ final class AudioDeviceManager: ObservableObject {
 
     func endpoint(forUID uid: String) -> AudioEndpoint? {
         inputs.first { $0.uid == uid } ?? outputs.first { $0.uid == uid }
+    }
+
+    /// True when the given uid is the Audeon virtual device, so the UI can keep
+    /// it out of the raw device pickers (it is used only via System Audio).
+    func isVirtualSystemAudio(_ uid: String) -> Bool { uid == audeonVirtualDeviceUID }
+
+    /// The best available whole-system capture sink: the Audeon virtual device
+    /// if its driver is installed, otherwise BlackHole if present, else nil.
+    /// Driver-agnostic so the System Audio feature works either way.
+    var systemAudioSinkUID: String? {
+        if deviceIDByUID[audeonVirtualDeviceUID] != nil { return audeonVirtualDeviceUID }
+        if let bh = outputs.first(where: { $0.name.localizedCaseInsensitiveContains("blackhole") }) {
+            return bh.uid
+        }
+        return nil
     }
 
     // MARK: - Enumeration

@@ -2,30 +2,29 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>Audeon</string>
-    <key>CFBundleDisplayName</key>
-    <string>Audeon</string>
-    <key>CFBundleIdentifier</key>
-    <string>io.github.muaz978.audeon</string>
-    <key>CFBundleVersion</key>
-    <string>27</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.8.0</string>
-    <key>CFBundleIconFile</key>
-    <string>Audeon</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleExecutable</key>
-    <string>Audeon</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <!-- Required so macOS can show the microphone permission prompt (TCC). -->
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Audeon routes and mixes audio from your input devices.</string>
-    <key>LSApplicationCategoryType</key>
-    <string>public.app-category.music</string>
+	<key>CFBundleDisplayName</key>
+	<string>Audeon</string>
+	<key>CFBundleExecutable</key>
+	<string>Audeon</string>
+	<key>CFBundleIconFile</key>
+	<string>Audeon</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.muaz978.audeon</string>
+	<key>CFBundleName</key>
+	<string>Audeon</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.8.1</string>
+	<key>CFBundleVersion</key>
+	<string>28</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.music</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Audeon routes and mixes audio from your input devices.</string>
 </dict>
 </plist>

@@ -131,23 +131,67 @@ final class MixerStore: ObservableObject {
         inputs.append(InputSource(kind: .app(bundleID), displayName: name))
     }
 
-    /// The MixLine/Voicemeeter-style workflow: set a virtual sink device as
-    /// the system default output, so everything the Mac plays lands in it,
-    /// then bring it into Audeon as a single labeled "System Audio" input
-    /// ready to route anywhere. Works with BlackHole today since it is a
-    /// free, already-signed virtual device; the same helper will work with a
-    /// future Audeon-branded virtual device without any call site changes.
+    // MARK: - System Audio bridge (MixLine/Voicemeeter-style)
+
+    /// True while whole-system audio is being captured through the virtual sink.
+    @Published private(set) var systemAudioActive = false
+    /// The real output that was the system default before we redirected it, so
+    /// turning the bridge off restores exactly what the user had.
+    private var previousDefaultOutputUID: String?
+
+    /// Whether a capture sink (Audeon virtual device or BlackHole) is available.
+    var systemAudioSinkAvailable: Bool { deviceManager.systemAudioSinkUID != nil }
+
+    /// Set the virtual sink as the system default output, so everything the Mac
+    /// plays lands in it, and bring it into Audeon as one labeled "System Audio"
+    /// input ready to route to any real output. The user then connects that
+    /// card to their speakers or headphones on the canvas.
+    func enableSystemAudioCapture(label: String = "System Audio") {
+        guard let sink = deviceManager.systemAudioSinkUID else { return }
+        // Remember the real output we are replacing (never remember the sink
+        // itself, or turning the bridge off would restore silence).
+        if let current = systemAudio.defaultOutputUID, current != sink {
+            previousDefaultOutputUID = current
+        }
+        systemAudio.setDefaultOutput(sink)
+        if !inputs.contains(where: { $0.kind == .device(sink) }) {
+            inputs.append(InputSource(kind: .device(sink), displayName: label))
+        }
+        setNickname(label, forUID: sink)
+
+        // One-click: route System Audio straight to the speakers the user was
+        // already using, so sound keeps playing through Audeon immediately.
+        // They can add more outputs afterward on the canvas.
+        if let source = inputs.first(where: { $0.kind == .device(sink) }),
+           let prev = previousDefaultOutputUID {
+            let outputID = ensureOutput(uid: prev)
+            if !isConnected(sourceID: source.id, outputID: outputID) {
+                connect(sourceID: source.id, outputID: outputID)
+            }
+        }
+        systemAudioActive = true
+    }
+
+    /// Stop capturing system audio: restore the previous default output and
+    /// remove the System Audio card.
+    func disableSystemAudioCapture() {
+        let restore = previousDefaultOutputUID
+            ?? deviceManager.outputs.first(where: { !deviceManager.isVirtualSystemAudio($0.uid) })?.uid
+        if let restore { systemAudio.setDefaultOutput(restore) }
+        if let sink = deviceManager.systemAudioSinkUID {
+            if let source = inputs.first(where: { $0.kind == .device(sink) }) {
+                removeInput(source.id)
+            }
+        }
+        systemAudioActive = false
+    }
+
+    /// Backwards-compatible wrapper used by the onboarding screen.
     @discardableResult
     func captureSystemAudio(usingOutputNamed nameContains: String = "blackhole",
                             label: String = "System Audio") -> Bool {
-        guard let sink = deviceManager.outputs.first(where: {
-            $0.name.localizedCaseInsensitiveContains(nameContains)
-        }) else { return false }
-        systemAudio.setDefaultOutput(sink.uid)
-        if !inputs.contains(where: { $0.kind == .device(sink.uid) }) {
-            addDeviceInput(uid: sink.uid)
-        }
-        setNickname(label, forUID: sink.uid)
+        guard systemAudioSinkAvailable else { return false }
+        enableSystemAudioCapture(label: label)
         return true
     }
 

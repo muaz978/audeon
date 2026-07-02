@@ -129,8 +129,21 @@ struct RoutingCanvasView: View {
         Menu {
             let usedDevices = Set(store.inputs.compactMap { $0.deviceUID })
             let usedApps = Set(store.inputs.compactMap { $0.appBundleID })
+            if store.systemAudioSinkAvailable {
+                Section("System") {
+                    if store.systemAudioActive {
+                        Button("Stop capturing system audio") { store.disableSystemAudioCapture() }
+                    } else {
+                        Button("Capture system audio") { store.enableSystemAudioCapture() }
+                    }
+                }
+            }
             Section("Audio devices") {
-                ForEach(store.deviceManager.inputs.filter { !usedDevices.contains($0.uid) }) { d in
+                // The virtual sink is offered only via "Capture system audio",
+                // never as a raw device, so it cannot be picked by mistake.
+                ForEach(store.deviceManager.inputs.filter {
+                    !usedDevices.contains($0.uid) && !store.deviceManager.isVirtualSystemAudio($0.uid)
+                }) { d in
                     Button(d.name) { store.addDeviceInput(uid: d.uid) }
                 }
             }
@@ -150,7 +163,11 @@ struct RoutingCanvasView: View {
         Menu {
             let used = Set(store.outputs.map { $0.uid })
             Section("Devices") {
-                ForEach(store.deviceManager.outputs.filter { !used.contains($0.uid) }) { d in
+                // Never offer the virtual sink as an output: routing into it
+                // would feed system audio back into itself (a loop).
+                ForEach(store.deviceManager.outputs.filter {
+                    !used.contains($0.uid) && !store.deviceManager.isVirtualSystemAudio($0.uid)
+                }) { d in
                     Button(d.name) { store.addOutput(uid: d.uid) }
                 }
             }
