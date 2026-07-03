@@ -3,12 +3,14 @@ import CoreAudio
 import AppKit
 import Combine
 
-/// A running application that the audio system knows about.
+/// A running application that the audio system knows about. An app can own
+/// several audio processes at once (browsers play each tab from a separate
+/// helper process), so we keep all of them and tap them together.
 struct AudioApp: Identifiable, Equatable {
     let bundleID: String
     let name: String
-    let pid: pid_t
-    let processObject: AudioObjectID
+    let pid: pid_t                       // the owning regular app (for icon)
+    let processObjects: [AudioObjectID]  // every audio process this app owns
 
     var id: String { bundleID }
 
@@ -18,7 +20,7 @@ struct AudioApp: Identifiable, Equatable {
     }
 
     static func == (lhs: AudioApp, rhs: AudioApp) -> Bool {
-        lhs.bundleID == rhs.bundleID && lhs.processObject == rhs.processObject
+        lhs.bundleID == rhs.bundleID && lhs.processObjects == rhs.processObjects
     }
 }
 
@@ -70,18 +72,25 @@ final class AppAudioManager: ObservableObject {
 
     func refresh() {
         let objects = Self.processObjects()
-        var seen = Set<String>()
-        var result: [AudioApp] = []
 
+        // Group every audio process object under its owning regular app. A raw
+        // audio process is often a child helper (browsers, Electron apps), so
+        // resolve it up to the visible application before grouping.
+        struct Group { let app: NSRunningApplication; var objects: [AudioObjectID] }
+        var byBundle: [String: Group] = [:]
         for obj in objects {
             guard let pid = Self.pid(of: obj),
-                  let running = NSRunningApplication(processIdentifier: pid),
-                  running.activationPolicy == .regular,
-                  let bundleID = running.bundleIdentifier,
-                  !seen.contains(bundleID) else { continue }
-            seen.insert(bundleID)
-            let name = running.localizedName ?? bundleID
-            result.append(AudioApp(bundleID: bundleID, name: name, pid: pid, processObject: obj))
+                  let owner = Self.owningRegularApp(pid: pid),
+                  let bundleID = owner.bundleIdentifier else { continue }
+            if byBundle[bundleID] == nil { byBundle[bundleID] = Group(app: owner, objects: []) }
+            byBundle[bundleID]?.objects.append(obj)
+        }
+
+        let result = byBundle.map { bundleID, group in
+            AudioApp(bundleID: bundleID,
+                     name: group.app.localizedName ?? bundleID,
+                     pid: group.app.processIdentifier,
+                     processObjects: group.objects.sorted())
         }
 
         let sorted = result.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -109,6 +118,43 @@ final class AppAudioManager: ObservableObject {
         guard AudioObjectGetPropertyData(
             AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &out) == noErr else { return [] }
         return out
+    }
+
+    /// Resolve an audio process pid to the visible regular application that owns
+    /// it. Audio often comes from a child helper (Microsoft Edge Helper, Chrome
+    /// renderer, Electron GPU process); walking the parent chain, then falling
+    /// back to a bundle-id prefix match, maps it back to Edge/Chrome/etc.
+    private static func owningRegularApp(pid: pid_t) -> NSRunningApplication? {
+        var current = pid
+        for _ in 0..<8 {
+            if let app = NSRunningApplication(processIdentifier: current),
+               app.activationPolicy == .regular, app.bundleIdentifier != nil {
+                return app
+            }
+            guard let parent = parentPID(of: current), parent > 1, parent != current else { break }
+            current = parent
+        }
+        // Fallback: a helper's bundle id ("com.microsoft.edgemac.helper") starts
+        // with the main app's bundle id. Find the running app that matches.
+        if let helperBundle = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier {
+            return NSWorkspace.shared.runningApplications.first {
+                $0.activationPolicy == .regular
+                    && ($0.bundleIdentifier.map { helperBundle.hasPrefix($0) } ?? false)
+            }
+        }
+        return nil
+    }
+
+    /// Parent pid via sysctl (public API), for the process-tree walk.
+    private static func parentPID(of pid: pid_t) -> pid_t? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        let ok = mib.withUnsafeMutableBufferPointer { buf in
+            sysctl(buf.baseAddress, 4, &info, &size, nil, 0) == 0
+        }
+        guard ok, size > 0 else { return nil }
+        return info.kp_eproc.e_ppid
     }
 
     private static func pid(of object: AudioObjectID) -> pid_t? {

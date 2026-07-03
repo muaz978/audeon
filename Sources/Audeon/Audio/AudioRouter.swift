@@ -199,9 +199,17 @@ private final class RouteEngine {
             onLevel(AudioMeter.reading(for: buffer))
         }
 
+        let inFmt = engine.inputNode.outputFormat(forBus: 0)
+        let outFmt = engine.outputNode.inputFormat(forBus: 0)
         engine.prepare()
-        try engine.start()
+        do {
+            try engine.start()
+        } catch {
+            NSLog("Audeon.route: FAILED device route \(inputDeviceUID) -> \(outputDeviceUID): \(error) | in \(Int(inFmt.channelCount))ch out \(Int(outFmt.channelCount))ch")
+            throw error
+        }
         started = true
+        NSLog("Audeon.route: STARTED device route \(inputDeviceUID) -> \(outputDeviceUID) | in \(Int(inFmt.channelCount))ch@\(Int(inFmt.sampleRate)) out \(Int(outFmt.channelCount))ch@\(Int(outFmt.sampleRate))")
     }
 
     func configure(_ route: Route) {

@@ -12,7 +12,7 @@ let audeonAggregateName = "Audeon Redirect"
 /// and EQ.
 struct AppTapRequest: Equatable {
     let bundleID: String
-    let processObject: AudioObjectID
+    let processObjects: [AudioObjectID]   // all audio processes owned by the app
     let outputUID: String
     let volume: Float
     let boost: Double
@@ -50,7 +50,7 @@ final class AppRedirectEngine: ObservableObject {
         }
 
         for (k, unit) in units {
-            if let w = wanted[k], w.processObject == unit.process {
+            if let w = wanted[k], w.processObjects == unit.processes {
                 unit.configure(volume: w.volume, boost: w.boost, eqEnabled: w.eqEnabled, eq: w.eq, magicBoost: w.magicBoost)
             } else {
                 unit.stop(); units[k] = nil
@@ -109,7 +109,7 @@ final class AppRedirectEngine: ObservableObject {
 // MARK: - One tapped app
 
 private final class TapUnit {
-    let process: AudioObjectID
+    let processes: [AudioObjectID]
 
     private var tapID: AudioObjectID = 0
     private var aggregateID: AudioObjectID = 0
@@ -121,17 +121,20 @@ private final class TapUnit {
     private let throttle = MeterThrottle()
 
     init?(request: AppTapRequest, onLevel: @escaping (MeterReading) -> Void) {
-        self.process = request.processObject
+        self.processes = request.processObjects
         self.onLevel = onLevel
 
         guard #available(macOS 14.2, *) else { cleanup(); return nil }
+        guard !request.processObjects.isEmpty else { cleanup(); return nil }
 
-        let desc = CATapDescription(stereoMixdownOfProcesses: [request.processObject])
+        // Tap every audio process the app owns (all of a browser's tabs), mixed
+        // down together, so nothing the app plays is missed.
+        let desc = CATapDescription(stereoMixdownOfProcesses: request.processObjects)
         desc.muteBehavior = .muted
         guard AudioHardwareCreateProcessTap(desc, &tapID) == noErr, tapID != 0 else { cleanup(); return nil }
         guard let tapUID = Self.cfString(tapID, kAudioTapPropertyUID) else { cleanup(); return nil }
 
-        let aggUID = "\(audeonAggregateUIDPrefix)\(request.processObject).\(UInt32.random(in: 1...UInt32.max))"
+        let aggUID = "\(audeonAggregateUIDPrefix)\(request.processObjects.first ?? 0).\(UInt32.random(in: 1...UInt32.max))"
         let aggDesc: [String: Any] = [
             kAudioAggregateDeviceNameKey as String: audeonAggregateName,
             kAudioAggregateDeviceUIDKey as String: aggUID,
@@ -178,8 +181,20 @@ private final class TapUnit {
             onLevel(AudioMeter.reading(for: buffer))
         }
 
-        do { engine.prepare(); try engine.start(); started = true }
-        catch { cleanup(); return nil }
+        let inFmt = engine.inputNode.outputFormat(forBus: 0)
+        let outFmt = engine.outputNode.inputFormat(forBus: 0)
+        do {
+            engine.prepare()
+            try engine.start()
+            started = true
+            NSLog("Audeon.route: STARTED app tap \(request.bundleID) -> \(request.outputUID) | in \(Int(inFmt.channelCount))ch@\(Int(inFmt.sampleRate)) out \(Int(outFmt.channelCount))ch@\(Int(outFmt.sampleRate))")
+        } catch {
+            // Previously this error was swallowed silently, so a route that
+            // failed to start just vanished and the app appeared to "only route
+            // to the default output". Surface it instead.
+            NSLog("Audeon.route: FAILED app tap \(request.bundleID) -> \(request.outputUID): \(error) | in \(Int(inFmt.channelCount))ch out \(Int(outFmt.channelCount))ch")
+            cleanup(); return nil
+        }
     }
 
     func configure(volume: Float, boost: Double, eqEnabled: Bool, eq gains: [Double], magicBoost magicBoostEnabled: Bool) {

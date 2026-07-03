@@ -498,8 +498,8 @@ final class MixerStore: ObservableObject {
                                     volume: Double(gain), isMuted: gain == 0, boost: source.boost,
                                     eqEnabled: source.eqEnabled, eq: source.eq, magicBoost: source.magicBoost))
             case .app(let bundleID):
-                guard let app = appByBundle[bundleID] else { return }
-                taps.append(AppTapRequest(bundleID: bundleID, processObject: app.processObject,
+                guard let app = appByBundle[bundleID], !app.processObjects.isEmpty else { return }
+                taps.append(AppTapRequest(bundleID: bundleID, processObjects: app.processObjects,
                                           outputUID: outputUID, volume: gain, boost: source.boost,
                                           eqEnabled: source.eqEnabled, eq: source.eq, magicBoost: source.magicBoost))
             }
