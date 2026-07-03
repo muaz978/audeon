@@ -63,6 +63,15 @@ private struct DevicesTab: View {
                 prompt: Text(entry.name))
             LabeledContent("Original name", value: entry.name)
                 .font(.caption).foregroundStyle(.secondary)
+            Picker("Icon", selection: Binding(
+                get: { store.customDeviceIcons[entry.uid] ?? "hifispeaker.fill" },
+                set: { store.setDeviceIcon($0, forUID: entry.uid) })) {
+                ForEach(MixerStore.deviceIconChoices, id: \.self) { symbol in
+                    Image(systemName: symbol).tag(symbol)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityLabel("Device icon")
         }
         if entry.isOutput {
             Section("Output") {
@@ -125,6 +134,9 @@ private struct DevicesTab: View {
 
 private struct GeneralTab: View {
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
+    @AppStorage("showHideHotkey") private var showHideHotkey = false
+    @AppStorage("superVolumeKeys") private var superVolumeKeys = false
+    @State private var volumeKeysNote: String?
 
     var body: some View {
         Form {
@@ -134,6 +146,25 @@ private struct GeneralTab: View {
                         do { on ? try SMAppService.mainApp.register() : try SMAppService.mainApp.unregister() }
                         catch { launchAtLogin = SMAppService.mainApp.status == .enabled }
                     }
+            }
+            Section("Keyboard") {
+                Toggle("Global show/hide shortcut (Option-Command-A)", isOn: $showHideHotkey)
+                    .onChange(of: showHideHotkey) { _, on in ShowHideHotkey.shared.setEnabled(on) }
+                Toggle("Super Volume Keys", isOn: $superVolumeKeys)
+                    .onChange(of: superVolumeKeys) { _, on in
+                        let ok = SuperVolumeKeys.shared.setEnabled(on)
+                        if on && !ok {
+                            superVolumeKeys = false
+                            volumeKeysNote = "Grant Audeon Accessibility access in the window macOS just opened, then turn this on again."
+                        } else {
+                            volumeKeysNote = nil
+                        }
+                    }
+                Text("Super Volume Keys makes the keyboard volume keys control the current default output through Audeon, including devices without native volume control. Needs Accessibility access.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let volumeKeysNote {
+                    Text(volumeKeysNote).font(.caption).foregroundStyle(.orange)
+                }
             }
             Section("Permissions") {
                 Button("Show Welcome & Permissions") {

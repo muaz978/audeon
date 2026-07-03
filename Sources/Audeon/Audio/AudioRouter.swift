@@ -10,23 +10,26 @@ let audeonRouteAggregateUIDPrefix = "audeon.route."
 
 /// Routes device sources to output devices.
 ///
-/// Important: on macOS, AVAudioEngine.inputNode and .outputNode share ONE
-/// underlying Audio Unit. Pointing that single unit at two different physical
-/// devices (one call to set the input device, a second to set the output
-/// device) does not create a real input-to-output route: the second call wins
-/// for both directions. The correct technique, used here and already proven by
-/// the per-app capture engine, is to combine the two real devices into one
-/// private aggregate device (with drift compensation, since they are
-/// independent hardware clocks) and bind the engine's single shared unit to
-/// that one aggregate. The aggregate's input side carries the input device's
-/// channels and its output side carries the output device's channels.
+/// Two engines, chosen per route:
+///
+/// - Same device on both ends: an AVAudioEngine bound directly to it, with the
+///   full DSP chain (EQ, overdrive, Magic Boost).
+/// - Two different devices: a private aggregate combining them (independent
+///   hardware clocks, so drift compensation on the sub-devices) driven by a
+///   direct I/O proc. AVAudioEngine's input and output share one HAL unit and
+///   binding that single unit to an aggregate proved fragile across sample
+///   rate and channel layouts; the I/O proc reads the input device's channels
+///   and writes the output device's channels explicitly, the same low-level
+///   primitive already proven by the earliest per-app capture engine.
+///   Trade-off: gain and mute apply on this path, while EQ, overdrive, and
+///   Magic Boost do not yet.
 final class AudioRouter: ObservableObject {
     @Published private(set) var lastError: String?
     /// Live meter per route id (same id as the connection it came from).
     @Published private(set) var levels: [UUID: MeterReading] = [:]
 
     private let deviceManager: AudioDeviceManager
-    private var engines: [UUID: RouteEngine] = [:]
+    private var engines: [UUID: AnyRouteEngine] = [:]
     private let lock = NSLock()
 
     init(deviceManager: AudioDeviceManager) {
@@ -56,35 +59,45 @@ final class AudioRouter: ObservableObject {
                engine.inputDeviceID == inID, engine.outputDeviceID == outID {
                 engine.configure(route)
             } else {
-                // Tear down whatever was here (a stale or mismatched engine,
-                // or nothing) and clear the slot before attempting the new
-                // one. If the new engine fails to start, this route must end
-                // up with no entry, not a leftover stopped engine: a stale
-                // entry could later "match" a route that reverts to the same
-                // device pair and silently look connected while being dead.
+                // Tear down whatever was here and clear the slot before
+                // attempting the new engine, so a failed start leaves no stale
+                // entry that could later masquerade as a live route.
                 engines[route.id]?.stop()
                 engines[route.id] = nil
 
                 // A device that has never been selected in System Settings
-                // keeps whatever mute/volume state it last had, completely
-                // independent of anything in Audeon. Wake it once here so a
-                // freshly connected route is not silently muted at the
-                // hardware level before a single sample is ever sent to it.
+                // keeps whatever mute/volume state it last had. Wake it once
+                // so a fresh route is not silently muted at the hardware level.
                 deviceManager.wakeOutputIfSilent(forUID: route.outputDeviceUID)
 
                 let id = route.id
-                let engine = RouteEngine(
-                    inputDeviceUID: route.inputDeviceUID, inputDeviceID: inID,
-                    outputDeviceUID: route.outputDeviceUID, outputDeviceID: outID,
-                    onLevel: { [weak self] reading in
-                        DispatchQueue.main.async { self?.levels[id] = reading }
-                    })
+                let onLevel: (MeterReading) -> Void = { [weak self] reading in
+                    DispatchQueue.main.async { self?.levels[id] = reading }
+                }
+                let engine: AnyRouteEngine
+                if route.inputDeviceUID == route.outputDeviceUID {
+                    engine = SameDeviceRouteEngine(
+                        inputDeviceUID: route.inputDeviceUID, inputDeviceID: inID,
+                        outputDeviceUID: route.outputDeviceUID, outputDeviceID: outID,
+                        onLevel: onLevel)
+                } else {
+                    engine = CrossDeviceRouteEngine(
+                        inputDeviceUID: route.inputDeviceUID, inputDeviceID: inID,
+                        outputDeviceUID: route.outputDeviceUID, outputDeviceID: outID,
+                        onLevel: onLevel)
+                }
                 do { try engine.start(route); engines[route.id] = engine }
                 catch {
                     DispatchQueue.main.async { self.lastError = error.localizedDescription }
                 }
             }
         }
+    }
+
+    /// Attach or detach a recorder on a live route's engine.
+    func setRecorder(routeID: UUID, _ recorder: MixRecorder?) {
+        lock.lock(); defer { lock.unlock() }
+        engines[routeID]?.recorderSlot.recorder = recorder
     }
 
     func stopAll() {
@@ -119,23 +132,46 @@ final class AudioRouter: ObservableObject {
     }
 }
 
-private final class RouteEngine {
+// MARK: - Engine protocol
+
+protocol AnyRouteEngine: AnyObject {
+    var inputDeviceUID: String { get }
+    var outputDeviceUID: String { get }
+    var inputDeviceID: AudioDeviceID { get }
+    var outputDeviceID: AudioDeviceID { get }
+    var recorderSlot: RecorderSlot { get }
+    func start(_ route: Route) throws
+    func configure(_ route: Route)
+    func stop()
+}
+
+enum RouteEngineError: LocalizedError {
+    case noUnit(String), setDevice(String, OSStatus), aggregateCreate(OSStatus), ioProcCreate(OSStatus), deviceStart(OSStatus)
+    var errorDescription: String? {
+        switch self {
+        case .noUnit(let l): return "Missing \(l) audio unit"
+        case .setDevice(let l, let s): return "Could not set \(l) device (\(s))"
+        case .aggregateCreate(let s): return "Could not create the routing aggregate device (\(s))"
+        case .ioProcCreate(let s): return "Could not create the routing I/O callback (\(s))"
+        case .deviceStart(let s): return "Could not start the routing device (\(s))"
+        }
+    }
+}
+
+// MARK: - Same-device engine (full DSP chain)
+
+private final class SameDeviceRouteEngine: AnyRouteEngine {
     let inputDeviceUID: String
     let outputDeviceUID: String
-    // The resolved AudioDeviceID at the moment this engine was bound. A UID
-    // is stable across unplug and replug, but CoreAudio commonly assigns a
-    // new numeric AudioDeviceID on reconnect; the bound AVAudioEngine still
-    // points at the old, now-dead ID. apply() must rebuild in that case
-    // rather than treat a same-UID device as unchanged.
     let inputDeviceID: AudioDeviceID
     let outputDeviceID: AudioDeviceID
+    let recorderSlot = RecorderSlot()
 
     private let engine = AVAudioEngine()
     private let eq = AVAudioUnitEQ(numberOfBands: AudioEQ.bandCount)
     private let magicBoost = MagicBoost.makeEffect()
     private let onLevel: (MeterReading) -> Void
     private let throttle = MeterThrottle()
-    private var aggregateID: AudioObjectID = 0
     private var started = false
 
     init(inputDeviceUID: String, inputDeviceID: AudioDeviceID,
@@ -157,12 +193,6 @@ private final class RouteEngine {
     }
 
     func start(_ route: Route) throws {
-        // If anything below throws after the aggregate device is created, the
-        // aggregate must still be torn down here. The instance itself may be
-        // discarded immediately by the caller on failure (it is never stored
-        // in AudioRouter.engines on a thrown error), and waiting on ARC/deinit
-        // timing for a CoreAudio system resource is fragile to reason about,
-        // so clean up explicitly before rethrowing.
         do {
             try startUnsafe(route)
         } catch {
@@ -172,19 +202,16 @@ private final class RouteEngine {
     }
 
     private func startUnsafe(_ route: Route) throws {
-        // Input and output device are the same hardware: bind directly, no
-        // aggregate needed, and no cross-clock drift to compensate for.
-        if inputDeviceUID == outputDeviceUID {
-            try bind(inputDeviceID)
-        } else {
-            try createAndBindAggregate()
-        }
+        guard let unit = engine.inputNode.audioUnit else { throw RouteEngineError.noUnit("device") }
+        var dev = inputDeviceID
+        let status = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
+                                          kAudioUnitScope_Global, 0, &dev,
+                                          UInt32(MemoryLayout<AudioDeviceID>.size))
+        if status != noErr { throw RouteEngineError.setDevice("device", status) }
+        engine.reset()
 
         engine.attach(eq)
         engine.attach(magicBoost)
-        // Use the engine's own format queries (not a manually built format from
-        // a raw hardware ASBD: AVAudioEngine.connect rejects formats it did not
-        // derive itself and can throw an Objective-C exception when given one).
         let inputFormat = engine.inputNode.outputFormat(forBus: 0)
         let outputFormat = engine.outputNode.inputFormat(forBus: 0)
 
@@ -194,26 +221,27 @@ private final class RouteEngine {
         engine.connect(engine.mainMixerNode, to: engine.outputNode, format: outputFormat)
         configure(route)
 
-        // Meter the final mixed signal (post EQ, boost, and volume).
+        // One tap serves both the meter (throttled) and the recorder (every
+        // buffer): a bus allows only a single tap.
         let onLevel = self.onLevel
         let throttle = self.throttle
+        let slot = self.recorderSlot
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024,
                                         format: engine.mainMixerNode.outputFormat(forBus: 0)) { buffer, _ in
+            slot.recorder?.append(buffer)
             guard throttle.shouldFire() else { return }
             onLevel(AudioMeter.reading(for: buffer))
         }
 
-        let inFmt = engine.inputNode.outputFormat(forBus: 0)
-        let outFmt = engine.outputNode.inputFormat(forBus: 0)
         engine.prepare()
         do {
             try engine.start()
         } catch {
-            NSLog("Audeon.route: FAILED device route \(inputDeviceUID) -> \(outputDeviceUID): \(error) | in \(Int(inFmt.channelCount))ch out \(Int(outFmt.channelCount))ch")
+            NSLog("Audeon.route: FAILED device route \(inputDeviceUID) -> \(outputDeviceUID): \(error) | in \(Int(inputFormat.channelCount))ch out \(Int(outputFormat.channelCount))ch")
             throw error
         }
         started = true
-        NSLog("Audeon.route: STARTED device route \(inputDeviceUID) -> \(outputDeviceUID) | in \(Int(inFmt.channelCount))ch@\(Int(inFmt.sampleRate)) out \(Int(outFmt.channelCount))ch@\(Int(outFmt.sampleRate))")
+        NSLog("Audeon.route: STARTED device route \(inputDeviceUID) -> \(outputDeviceUID) | in \(Int(inputFormat.channelCount))ch@\(Int(inputFormat.sampleRate)) out \(Int(outputFormat.channelCount))ch@\(Int(outputFormat.sampleRate))")
     }
 
     func configure(_ route: Route) {
@@ -228,17 +256,55 @@ private final class RouteEngine {
 
     func stop() {
         if started { engine.mainMixerNode.removeTap(onBus: 0); engine.stop(); started = false }
-        if aggregateID != 0 { AudioHardwareDestroyAggregateDevice(aggregateID); aggregateID = 0 }
+    }
+}
+
+// MARK: - Cross-device engine (direct I/O proc on a private aggregate)
+
+private final class CrossDeviceRouteEngine: AnyRouteEngine {
+    let inputDeviceUID: String
+    let outputDeviceUID: String
+    let inputDeviceID: AudioDeviceID
+    let outputDeviceID: AudioDeviceID
+    let recorderSlot = RecorderSlot()
+
+    private var aggregateID: AudioObjectID = 0
+    private var procID: AudioDeviceIOProcID?
+    private var running = false
+    private var sampleRate: Double = 48000
+
+    // Read by the audio thread every cycle, written by configure() on the main
+    // thread. A single Float write is atomic enough for a gain value.
+    private let gain = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+
+    private let onLevel: (MeterReading) -> Void
+    private let throttle = MeterThrottle()
+
+    init(inputDeviceUID: String, inputDeviceID: AudioDeviceID,
+         outputDeviceUID: String, outputDeviceID: AudioDeviceID,
+         onLevel: @escaping (MeterReading) -> Void) {
+        self.inputDeviceUID = inputDeviceUID
+        self.inputDeviceID = inputDeviceID
+        self.outputDeviceUID = outputDeviceUID
+        self.outputDeviceID = outputDeviceID
+        self.onLevel = onLevel
+        gain.initialize(to: 0)
     }
 
-    // MARK: - Device binding
-
-    private func bind(_ device: AudioDeviceID) throws {
-        try setDevice(device, on: engine.inputNode.audioUnit, label: "device")
-        engine.reset()
+    deinit {
+        gain.deallocate()
     }
 
-    private func createAndBindAggregate() throws {
+    func start(_ route: Route) throws {
+        do {
+            try startUnsafe(route)
+        } catch {
+            stop()
+            throw error
+        }
+    }
+
+    private func startUnsafe(_ route: Route) throws {
         let aggUID = "\(audeonRouteAggregateUIDPrefix)\(UUID().uuidString)"
         let aggDesc: [String: Any] = [
             kAudioAggregateDeviceNameKey as String: "Audeon Route",
@@ -247,38 +313,151 @@ private final class RouteEngine {
             kAudioAggregateDeviceIsStackedKey as String: 0,
             kAudioAggregateDeviceMainSubDeviceKey as String: outputDeviceUID,
             kAudioAggregateDeviceSubDeviceListKey as String: [
-                [kAudioSubDeviceUIDKey as String: outputDeviceUID,
-                 kAudioSubDeviceDriftCompensationKey as String: 1],
+                [kAudioSubDeviceUIDKey as String: outputDeviceUID],
                 [kAudioSubDeviceUIDKey as String: inputDeviceUID,
                  kAudioSubDeviceDriftCompensationKey as String: 1]
             ]
         ]
-        guard AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &aggregateID) == noErr,
-              aggregateID != 0 else { throw Err.aggregateCreate }
+        let aggStatus = AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &aggregateID)
+        guard aggStatus == noErr, aggregateID != 0 else {
+            NSLog("Audeon.route: FAILED cross route aggregate \(inputDeviceUID) -> \(outputDeviceUID) (status \(aggStatus))")
+            throw RouteEngineError.aggregateCreate(aggStatus)
+        }
         // Give CoreAudio a moment to settle the aggregate's derived clock and
-        // stream formats before any unit binds to it.
+        // stream formats before I/O begins.
         Thread.sleep(forTimeInterval: 0.05)
-        try setDevice(aggregateID, on: engine.inputNode.audioUnit, label: "aggregate")
-        engine.reset()
+        sampleRate = Self.nominalSampleRate(aggregateID) ?? 48000
+
+        configure(route)
+
+        let gain = self.gain
+        let onLevel = self.onLevel
+        let throttle = self.throttle
+        let slot = self.recorderSlot
+        let rate = self.sampleRate
+
+        let procStatus = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, nil) { _, inInput, _, outOutput, _ in
+            Self.render(input: inInput, output: outOutput, gain: gain.pointee,
+                        slot: slot, sampleRate: rate, throttle: throttle, onLevel: onLevel)
+        }
+        guard procStatus == noErr, let procID else {
+            NSLog("Audeon.route: FAILED cross route ioproc \(inputDeviceUID) -> \(outputDeviceUID) (status \(procStatus))")
+            throw RouteEngineError.ioProcCreate(procStatus)
+        }
+        let startStatus = AudioDeviceStart(aggregateID, procID)
+        guard startStatus == noErr else {
+            NSLog("Audeon.route: FAILED cross route start \(inputDeviceUID) -> \(outputDeviceUID) (status \(startStatus))")
+            throw RouteEngineError.deviceStart(startStatus)
+        }
+        running = true
+        NSLog("Audeon.route: STARTED cross route \(inputDeviceUID) -> \(outputDeviceUID) via I/O proc @\(Int(sampleRate))")
     }
 
-    private func setDevice(_ device: AudioDeviceID, on unit: AudioUnit?, label: String) throws {
-        guard let unit = unit else { throw Err.noUnit(label) }
-        var dev = device
-        let status = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
-                                          kAudioUnitScope_Global, 0, &dev,
-                                          UInt32(MemoryLayout<AudioDeviceID>.size))
-        if status != noErr { throw Err.setDevice(label, status) }
-    }
+    /// The realtime callback body: copy the input device's channels to the
+    /// output device's channels with gain, repeating input channels as needed
+    /// (mono input fills a stereo output), metering and recording on the way.
+    private static func render(input: UnsafePointer<AudioBufferList>,
+                               output: UnsafeMutablePointer<AudioBufferList>,
+                               gain: Float,
+                               slot: RecorderSlot,
+                               sampleRate: Double,
+                               throttle: MeterThrottle,
+                               onLevel: @escaping (MeterReading) -> Void) {
+        let inList = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
+        let outList = UnsafeMutableAudioBufferListPointer(output)
 
-    private enum Err: LocalizedError {
-        case noUnit(String), setDevice(String, OSStatus), aggregateCreate
-        var errorDescription: String? {
-            switch self {
-            case .noUnit(let l): return "Missing \(l) audio unit"
-            case .setDevice(let l, let s): return "Could not set \(l) device (\(s))"
-            case .aggregateCreate: return "Could not create the routing aggregate device"
+        // Flatten the input side into logical channels (a stream buffer can
+        // carry several interleaved channels).
+        var inChannels: [(base: UnsafePointer<Float>, stride: Int, frames: Int)] = []
+        inChannels.reserveCapacity(8)
+        for buf in inList {
+            guard let data = buf.mData, buf.mNumberChannels > 0 else { continue }
+            let chs = Int(buf.mNumberChannels)
+            let frames = Int(buf.mDataByteSize) / (MemoryLayout<Float>.size * chs)
+            let base = data.assumingMemoryBound(to: Float.self)
+            for c in 0..<chs {
+                inChannels.append((base: UnsafePointer(base) + c, stride: chs, frames: frames))
             }
         }
+
+        var sumSquares: Float = 0
+        var peak: Float = 0
+        var meterSamples = 0
+        var globalOut = 0
+
+        for buf in outList {
+            guard let data = buf.mData, buf.mNumberChannels > 0 else { continue }
+            let chs = Int(buf.mNumberChannels)
+            let frames = Int(buf.mDataByteSize) / (MemoryLayout<Float>.size * chs)
+            let base = data.assumingMemoryBound(to: Float.self)
+
+            for c in 0..<chs {
+                if inChannels.isEmpty {
+                    for f in 0..<frames { base[f * chs + c] = 0 }
+                } else {
+                    let src = inChannels[globalOut % inChannels.count]
+                    let n = min(frames, src.frames)
+                    for f in 0..<n {
+                        let s = src.base[f * src.stride] * gain
+                        base[f * chs + c] = s
+                        sumSquares += s * s
+                        let a = abs(s)
+                        if a > peak { peak = a }
+                    }
+                    if n < frames {
+                        for f in n..<frames { base[f * chs + c] = 0 }
+                    }
+                    meterSamples += n
+                }
+                globalOut += 1
+            }
+        }
+
+        if let recorder = slot.recorder, !inChannels.isEmpty {
+            // Deinterleave the post-gain signal for the file. Only taken while
+            // actually recording, so the steady-state path stays copy-free.
+            let frames = inChannels[0].frames
+            let chCount = min(inChannels.count, 2)
+            var copies: [[Float]] = []
+            for c in 0..<chCount {
+                let src = inChannels[c]
+                var channel = [Float](repeating: 0, count: frames)
+                for f in 0..<min(frames, src.frames) { channel[f] = src.base[f * src.stride] * gain }
+                copies.append(channel)
+            }
+            recorder.append(deinterleaved: copies, sampleRate: sampleRate)
+        }
+
+        if meterSamples > 0, throttle.shouldFire() {
+            let rms = (sumSquares / Float(meterSamples)).squareRoot()
+            onLevel(AudioMeter.reading(rms: rms, peak: peak))
+        }
+    }
+
+    func configure(_ route: Route) {
+        // Gain and mute apply on this path; EQ, overdrive, and Magic Boost do
+        // not yet (documented in the README roadmap).
+        gain.pointee = route.isMuted ? 0 : Float(route.volume)
+    }
+
+    func stop() {
+        if let procID {
+            if running { AudioDeviceStop(aggregateID, procID) }
+            AudioDeviceDestroyIOProcID(aggregateID, procID)
+            self.procID = nil
+        }
+        running = false
+        if aggregateID != 0 { AudioHardwareDestroyAggregateDevice(aggregateID); aggregateID = 0 }
+    }
+
+    private static func nominalSampleRate(_ device: AudioObjectID) -> Double? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var size = UInt32(MemoryLayout<Float64>.size)
+        var v: Float64 = 0
+        guard AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &v) == noErr, v > 0 else { return nil }
+        return v
     }
 }

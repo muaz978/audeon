@@ -41,6 +41,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var onboardingWindow: NSWindow?
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Close any open recording files so they end with valid headers.
+        MixerStore.shared.stopAllRecordings()
         // If the System Audio bridge is on, nothing will drain the virtual sink
         // once Audeon is gone; leaving it as the system default would silence
         // the whole Mac. Hand the default back to a real output on the way out.
@@ -69,6 +71,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { MixerStore.shared.reapply() }
+        }
+
+        // Re-apply the opt-in keyboard features from the saved settings.
+        if UserDefaults.standard.bool(forKey: "showHideHotkey") {
+            ShowHideHotkey.shared.setEnabled(true)
+        }
+        if UserDefaults.standard.bool(forKey: "superVolumeKeys") {
+            // Silently skipped when Accessibility was revoked since last run;
+            // the Settings toggle reports that state when visited.
+            SuperVolumeKeys.shared.setEnabled(true)
         }
 
         requestPermissionsOnFirstLaunch()
@@ -437,12 +449,23 @@ private struct QuickControlsView: View {
                 Label("No Redirect", systemImage: connected.isEmpty && !source.followsSystemOutput ? "checkmark" : "")
             }
             Divider()
-            ForEach(store.deviceManager.outputs) { d in
+            ForEach(store.deviceManager.outputs.filter { !store.deviceManager.isVirtualSystemAudio($0.uid) }) { d in
                 Button { store.toggleRouteToDevice(sourceID: source.id, deviceUID: d.uid) } label: {
                     Label(d.name, systemImage: connected.contains(d.uid) ? "checkmark" : "")
                 }
             }
             .disabled(source.followsSystemOutput)
+            let groups = store.outputs.filter { $0.isGroup }
+            if !groups.isEmpty {
+                Divider()
+                ForEach(groups) { g in
+                    Button { store.toggleConnection(sourceID: source.id, outputID: g.id) } label: {
+                        Label(store.outputDisplayName(g),
+                              systemImage: store.isConnected(sourceID: source.id, outputID: g.id) ? "checkmark" : "")
+                    }
+                }
+                .disabled(source.followsSystemOutput)
+            }
         } label: {
             HStack(spacing: 3) {
                 Image(systemName: "arrow.up.forward").font(.system(size: 9))

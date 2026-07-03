@@ -15,6 +15,7 @@ private let columnWidth: CGFloat = 460
 /// The Mixline-style routing canvas.
 struct RoutingCanvasView: View {
     @EnvironmentObject var store: MixerStore
+    @State private var showGroupSheet = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -171,11 +172,15 @@ struct RoutingCanvasView: View {
                     Button(d.name) { store.addOutput(uid: d.uid) }
                 }
             }
+            Section("Groups") {
+                Button("New Output Group...") { showGroupSheet = true }
+            }
         } label: {
             Label("Add output", systemImage: "plus.circle.fill").font(.body.weight(.medium))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+        .sheet(isPresented: $showGroupSheet) { OutputGroupSheet() }
     }
 }
 
@@ -354,7 +359,11 @@ private struct InputCard: View {
                 .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named("canvas"))
                     .onChanged { v in store.dragSourceID = source.id; store.dragPoint = v.location }
                     .onEnded { v in store.endDrag(at: v.location, from: source.id) })
+                .accessibilityLabel("Connector for \(store.title(for: source))")
+                .accessibilityHint("Click, then click an output connector, to route this source")
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Input \(store.title(for: source))")
     }
 
     private var header: some View {
@@ -374,6 +383,18 @@ private struct InputCard: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            Button { store.toggleRecording(for: source.id) } label: {
+                Image(systemName: store.isRecording(source.id) ? "stop.circle.fill" : "record.circle")
+                    .font(.system(size: 15))
+                    .foregroundStyle(store.isRecording(source.id) ? .red : .secondary)
+            }
+            .buttonStyle(.borderless)
+            .disabled(!store.canRecord(source) && !store.isRecording(source.id))
+            .help(store.isRecording(source.id) ? "Stop recording"
+                  : (store.canRecord(source) ? "Record this source to a file"
+                                             : "Connect this source to an output to record it"))
+            .accessibilityLabel(store.isRecording(source.id) ? "Stop recording \(store.title(for: source))"
+                                                             : "Record \(store.title(for: source))")
             Button { withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() } } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 14))
@@ -390,6 +411,9 @@ private struct InputCard: View {
         Group {
             if let img = store.icon(for: source) {
                 Image(nsImage: img).resizable().frame(width: 26, height: 26).opacity(active ? 1 : 0.5)
+            } else if let deviceUID = source.deviceUID {
+                Image(systemName: store.customDeviceIcons[deviceUID] ?? "mic.fill")
+                    .font(.system(size: 16)).frame(width: 26, height: 26).foregroundStyle(color)
             } else {
                 Image(systemName: "mic.fill").font(.system(size: 16)).frame(width: 26, height: 26).foregroundStyle(color)
             }
@@ -401,12 +425,13 @@ private struct InputCard: View {
             ForEach(connected) { o in
                 HStack(spacing: 8) {
                     Circle().fill(store.color(forPin: o.pinKey).color).frame(width: 8, height: 8)
-                    Text(store.deviceManager.endpoint(forUID: o.uid)?.name ?? "Output")
+                    Text(store.outputDisplayName(o))
                         .font(.system(size: 12)).foregroundStyle(.primary.opacity(0.8)).lineLimit(1)
                     Spacer()
                     Button { withAnimation { store.disconnect(sourceID: source.id, outputID: o.id) } } label: {
                         Image(systemName: "minus.circle.fill").font(.system(size: 16)).foregroundStyle(.red.opacity(0.8))
                     }.buttonStyle(.borderless).help("Disconnect this output")
+                        .accessibilityLabel("Disconnect \(store.title(for: source)) from \(store.outputDisplayName(o))")
                 }
             }
         }
@@ -422,7 +447,10 @@ private struct InputCard: View {
                         .font(.system(size: 15))
                         .foregroundStyle(source.isMuted ? .red : .primary)
                 }.buttonStyle(.borderless).help(source.isMuted ? "Unmute" : "Mute")
+                    .accessibilityLabel(source.isMuted ? "Unmute \(store.title(for: source))" : "Mute \(store.title(for: source))")
                 Slider(value: Binding(get: { source.volume }, set: { v in store.updateInput(source.id) { $0.volume = v } }), in: 0...1)
+                    .accessibilityLabel("\(store.title(for: source)) volume")
+                    .accessibilityValue("\(Int(source.volume * 100)) percent")
                 Text("\(Int(source.volume * 100))%").font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
             }
@@ -537,24 +565,41 @@ private struct OutputCard: View {
     let output: OutputTarget
 
     private var color: Color { store.color(forPin: output.pinKey).color }
-    private var name: String { store.deviceManager.endpoint(forUID: output.uid)?.name ?? "Output" }
+    private var name: String {
+        if let groupName = output.groupName { return groupName }
+        return store.deviceManager.endpoint(forUID: output.uid)?.name ?? "Output"
+    }
     /// The device's own hardware volume/mute, independent of the route slider
     /// below. A device nobody has ever selected in System Settings can sit
     /// silent here with nothing Audeon does making a difference.
-    private var isHardwareSilent: Bool { store.deviceManager.isEffectivelySilent(forUID: output.uid) }
+    private var isHardwareSilent: Bool {
+        !output.isGroup && store.deviceManager.isEffectivelySilent(forUID: output.uid)
+    }
+    private var memberNames: String {
+        (output.groupMembers ?? []).map { store.deviceName(forUID: $0) }.joined(separator: ", ")
+    }
 
     var body: some View {
         HStack(spacing: 12) {
             Pin(key: output.pinKey, color: color,
                 highlighted: store.pendingSourceID != nil || store.dragSourceID != nil)
                 .onTapGesture { store.handleOutputPinTap(output.id) }
+                .accessibilityLabel("Connector for \(name)")
+                .accessibilityHint("Click after selecting an input connector to complete the route")
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
                     GripIcon()
-                    Image(systemName: "hifispeaker.fill").font(.system(size: 16)).frame(width: 26, height: 26).foregroundStyle(color)
-                    Text(name).font(.system(size: 15, weight: .semibold))
-                        .lineLimit(1).truncationMode(.tail)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Image(systemName: output.isGroup ? "hifispeaker.2.fill" : store.deviceIcon(forUID: output.uid))
+                        .font(.system(size: 16)).frame(width: 26, height: 26).foregroundStyle(color)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(name).font(.system(size: 15, weight: .semibold))
+                            .lineLimit(1).truncationMode(.tail)
+                        if output.isGroup {
+                            Text(memberNames).font(.system(size: 10))
+                                .foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     if isHardwareSilent {
                         Button {
                             store.deviceManager.wakeOutputIfSilent(forUID: output.uid)
@@ -577,7 +622,10 @@ private struct OutputCard: View {
                                 .font(.system(size: 15))
                                 .foregroundStyle(output.isMuted ? .red : .primary)
                         }.buttonStyle(.borderless)
+                            .accessibilityLabel(output.isMuted ? "Unmute \(name)" : "Mute \(name)")
                         Slider(value: Binding(get: { output.volume }, set: { v in store.updateOutput(output.id) { $0.volume = v } }), in: 0...1)
+                            .accessibilityLabel("\(name) volume")
+                            .accessibilityValue("\(Int(output.volume * 100)) percent")
                         Text("\(Int(output.volume * 100))%").font(.system(size: 12, design: .monospaced))
                             .foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
                     }
@@ -600,5 +648,49 @@ private struct OutputCard: View {
             }
         } label: { Image(systemName: "paintpalette").font(.system(size: 14)).foregroundStyle(.secondary) }
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Color")
+    }
+}
+
+// MARK: - Output Group creation sheet
+
+struct OutputGroupSheet: View {
+    @EnvironmentObject var store: MixerStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var selected: Set<String> = []
+
+    private var candidates: [AudioEndpoint] {
+        store.deviceManager.outputs.filter { !store.deviceManager.isVirtualSystemAudio($0.uid) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("New Output Group").font(.headline)
+            Text("One connection to the group plays on every member device at once.")
+                .font(.caption).foregroundStyle(.secondary)
+            TextField("Group name", text: $name, prompt: Text("Everywhere"))
+                .textFieldStyle(.roundedBorder)
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(candidates) { d in
+                    Toggle(isOn: Binding(
+                        get: { selected.contains(d.uid) },
+                        set: { on in if on { selected.insert(d.uid) } else { selected.remove(d.uid) } })) {
+                        Text(store.deviceName(forUID: d.uid))
+                    }
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Create") {
+                    store.addOutputGroup(name: name, memberUIDs: Array(selected))
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(selected.count < 2)
+            }
+        }
+        .padding(20)
+        .frame(width: 360)
     }
 }

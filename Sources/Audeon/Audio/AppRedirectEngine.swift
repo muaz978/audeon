@@ -85,6 +85,13 @@ final class AppRedirectEngine: ObservableObject {
         DispatchQueue.main.async { self.levels.removeAll() }
     }
 
+    /// Attach or detach a recorder on a live capture unit. The key is the same
+    /// "bundleID|outputUID" used internally by apply().
+    func setRecorder(bundleID: String, outputUID: String, _ recorder: MixRecorder?) {
+        lock.lock(); defer { lock.unlock() }
+        units[key(bundleID, outputUID)]?.recorderSlot.recorder = recorder
+    }
+
     /// Destroy any private aggregate devices left behind by a previous run.
     static func cleanupLeakedAggregates() {
         var addr = AudioObjectPropertyAddress(
@@ -114,6 +121,7 @@ final class AppRedirectEngine: ObservableObject {
 
 private final class TapUnit {
     let processes: [AudioObjectID]
+    let recorderSlot = RecorderSlot()
 
     private var tapID: AudioObjectID = 0
     private var aggregateID: AudioObjectID = 0
@@ -199,8 +207,10 @@ private final class TapUnit {
 
         let onLevel = self.onLevel
         let throttle = self.throttle
+        let slot = self.recorderSlot
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024,
                                         format: engine.mainMixerNode.outputFormat(forBus: 0)) { buffer, _ in
+            slot.recorder?.append(buffer)
             guard throttle.shouldFire() else { return }
             onLevel(AudioMeter.reading(for: buffer))
         }

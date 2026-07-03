@@ -31,6 +31,12 @@ enum AudioMeter {
             }
         }
         let rms = sqrt(sumSquares / Float(frames * channels))
+        return reading(rms: rms, peak: peak)
+    }
+
+    /// Normalize an already-computed rms/peak pair. Shared by the buffer path
+    /// above and the direct I/O proc engines, which accumulate inline.
+    static func reading(rms: Float, peak: Float) -> MeterReading {
         let rmsDB = rms > 0 ? 20 * log10(rms) : floorDB
         let peakDB = peak > 0 ? 20 * log10(peak) : floorDB
         let level = min(1, max(0, (rmsDB - floorDB) / -floorDB))

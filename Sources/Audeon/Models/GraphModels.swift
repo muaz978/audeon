@@ -70,16 +70,37 @@ struct InputSource: Identifiable, Codable, Equatable {
 /// An added output card (an output device). The user adds these with "Add output".
 struct OutputTarget: Identifiable, Codable, Equatable {
     let id: UUID
-    var uid: String        // output device uid
+    var uid: String        // output device uid; for a group, "group:<uuid>"
     var volume: Double
     var isMuted: Bool
+    /// Group support: a named bundle of output devices. A connection to a
+    /// group fans out to every member. nil for a plain device output.
+    var groupName: String?
+    var groupMembers: [String]?
 
-    init(id: UUID = UUID(), uid: String, volume: Double = 1.0, isMuted: Bool = false) {
+    init(id: UUID = UUID(), uid: String, volume: Double = 1.0, isMuted: Bool = false,
+         groupName: String? = nil, groupMembers: [String]? = nil) {
         self.id = id
         self.uid = uid
         self.volume = volume
         self.isMuted = isMuted
+        self.groupName = groupName
+        self.groupMembers = groupMembers
     }
+
+    enum CodingKeys: String, CodingKey { case id, uid, volume, isMuted, groupName, groupMembers }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        uid = try c.decode(String.self, forKey: .uid)
+        volume = try c.decode(Double.self, forKey: .volume)
+        isMuted = try c.decode(Bool.self, forKey: .isMuted)
+        groupName = try c.decodeIfPresent(String.self, forKey: .groupName)
+        groupMembers = try c.decodeIfPresent([String].self, forKey: .groupMembers)
+    }
+
+    var isGroup: Bool { groupMembers != nil }
 
     var pinKey: String { "out:\(id.uuidString)" }
 }

@@ -204,18 +204,20 @@ system audio capture; OBS, Discord, and Zoom can select it directly. It is
 ad hoc signed for now, so it loads on the machine that built it; a notarized
 build for general distribution needs an Apple Developer membership.
 
+Recent additions: cross-device hardware routes now run on a direct I/O proc
+on the private aggregate (the lower-level primitive, replacing the fragile
+shared-unit binding; gain and mute apply there, EQ and boost return to that
+path later), Output Groups (one connection plays on several devices at once),
+recording any routed source to a file in Music/Audeon Recordings, an opt-in
+global show/hide shortcut (Option-Command-A) and opt-in Super Volume Keys
+(Accessibility), per-device custom icons, and VoiceOver labels across the
+canvas.
+
 Still planned, in rough priority order:
 
-1. Verify cross-device hardware routing end to end by ear, and if needed
-   rework it on a direct I/O proc on the aggregate device (the same primitive
-   already proven for per-app capture) instead of binding AVAudioEngine's
-   shared input/output unit to the aggregate.
-2. Sign and notarize the app and driver for one-click installs.
-3. Output Groups, so one app can play to several devices at once.
-4. Recording a mix to a file, reusing the existing tap pipeline.
-5. Super volume keys and a global show or hide shortcut, both opt in and both
-   needing Accessibility access.
-6. Per-device custom icon, and broader VoiceOver labeling.
+1. Verify cross-device routing and system audio capture end to end by ear.
+2. Bring the EQ, overdrive, and Magic Boost chain to cross-device routes.
+3. Sign and notarize the app and driver for one-click installs.
 
 ## License
 

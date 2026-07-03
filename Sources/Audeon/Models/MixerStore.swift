@@ -17,6 +17,8 @@ final class MixerStore: ObservableObject {
     @Published var colors: [String: ChannelColor] = [:] { didSet { schedulePersist() } }
     /// Optional friendly names per device uid.
     @Published var deviceNicknames: [String: String] = [:] { didSet { schedulePersist() } }
+    /// Optional SF Symbol name per device uid, chosen in Settings > Devices.
+    @Published var customDeviceIcons: [String: String] = [:] { didSet { schedulePersist() } }
     /// Saved routing snapshots (Quick Configs / scenes).
     @Published var scenes: [MixScene] = [] { didSet { schedulePersist() } }
     /// Drives the "save scene" name sheet.
@@ -242,6 +244,41 @@ final class MixerStore: ObservableObject {
     func addOutput(uid: String) {
         guard !outputs.contains(where: { $0.uid == uid }) else { return }
         outputs.append(OutputTarget(uid: uid))
+    }
+
+    /// Create a named Output Group card that fans out to several devices.
+    func addOutputGroup(name: String, memberUIDs: [String]) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        let members = memberUIDs.filter { deviceManager.endpoint(forUID: $0) != nil }
+        guard !members.isEmpty else { return }
+        let groupID = UUID()
+        outputs.append(OutputTarget(
+            id: groupID,
+            uid: "group:\(groupID.uuidString)",
+            groupName: trimmed.isEmpty ? "Output Group" : trimmed,
+            groupMembers: members))
+    }
+
+    /// Display name for an output card: nickname or device name for devices,
+    /// the group's own name for groups.
+    func outputDisplayName(_ output: OutputTarget) -> String {
+        if let name = output.groupName { return name }
+        return deviceName(forUID: output.uid)
+    }
+
+    /// SF Symbol options offered in Settings for a device's custom icon.
+    static let deviceIconChoices = [
+        "hifispeaker.fill", "speaker.wave.2.fill", "headphones", "mic.fill",
+        "earbuds", "airpodspro", "display", "tv", "gamecontroller.fill", "music.note"
+    ]
+
+    /// The SF Symbol to show for a device: the user's choice, or a default.
+    func deviceIcon(forUID uid: String) -> String {
+        customDeviceIcons[uid] ?? "hifispeaker.fill"
+    }
+
+    func setDeviceIcon(_ symbol: String?, forUID uid: String) {
+        customDeviceIcons[uid] = symbol
     }
 
     func removeOutput(_ id: UUID) {
@@ -536,13 +573,122 @@ final class MixerStore: ObservableObject {
             } else {
                 for conn in connections where conn.sourceID == source.id {
                     guard let output = outputs.first(where: { $0.id == conn.outputID }) else { continue }
-                    addTarget(source, outputUID: output.uid,
-                              outputVolume: output.isMuted ? 0 : Float(output.volume), routeID: conn.id)
+                    let outVolume: Float = output.isMuted ? 0 : Float(output.volume)
+                    if let members = output.groupMembers {
+                        // A group fans one connection out to every member
+                        // device, each with its own stable derived route id.
+                        for (idx, member) in members.enumerated() {
+                            addTarget(source, outputUID: member, outputVolume: outVolume,
+                                      routeID: Self.derivedRouteID(from: conn.id, index: idx))
+                        }
+                    } else {
+                        addTarget(source, outputUID: output.uid,
+                                  outputVolume: outVolume, routeID: conn.id)
+                    }
                 }
             }
         }
         router.apply(routes: routes)
         appRedirectEngine.apply(taps)
+        attachRecorders()
+    }
+
+    // MARK: - Recording
+
+    /// Sources currently being recorded to a file.
+    @Published private(set) var recordingSourceIDs: Set<UUID> = []
+    private var recorders: [UUID: MixRecorder] = [:]
+
+    static var recordingsFolder: URL {
+        let base = FileManager.default.urls(for: .musicDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+        return base.appendingPathComponent("Audeon Recordings")
+    }
+
+    func isRecording(_ sourceID: UUID) -> Bool { recordingSourceIDs.contains(sourceID) }
+
+    /// A source can be recorded while at least one live route carries it.
+    func canRecord(_ source: InputSource) -> Bool {
+        source.followsSystemOutput || connections.contains { $0.sourceID == source.id }
+    }
+
+    func toggleRecording(for sourceID: UUID) {
+        if let recorder = recorders[sourceID] {
+            recorder.finish()
+            recorders[sourceID] = nil
+            recordingSourceIDs.remove(sourceID)
+            attachRecorders()   // clears the now-dead slot mapping
+        } else {
+            guard let source = inputs.first(where: { $0.id == sourceID }), canRecord(source) else { return }
+            try? FileManager.default.createDirectory(at: Self.recordingsFolder, withIntermediateDirectories: true)
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
+            let filename = "\(title(for: source)) \(formatter.string(from: Date())).caf"
+            let recorder = MixRecorder(url: Self.recordingsFolder.appendingPathComponent(filename))
+            recorders[sourceID] = recorder
+            recordingSourceIDs.insert(sourceID)
+            attachRecorders()
+        }
+    }
+
+    /// Close every open recording file (used when the app quits).
+    func stopAllRecordings() {
+        for (_, recorder) in recorders { recorder.finish() }
+        recorders.removeAll()
+        recordingSourceIDs.removeAll()
+    }
+
+    func revealRecordingsFolder() {
+        try? FileManager.default.createDirectory(at: Self.recordingsFolder, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(Self.recordingsFolder)
+    }
+
+    /// Mount each active recorder on whichever engine currently carries its
+    /// source. Runs after every reconciliation, because engines are rebuilt
+    /// there; the recorder object survives and keeps appending to one file.
+    private func attachRecorders() {
+        for source in inputs {
+            let recorder = recorders[source.id]   // nil detaches
+            switch source.kind {
+            case .device:
+                let routeID: UUID?
+                if source.followsSystemOutput {
+                    routeID = source.id
+                } else if let conn = connections.first(where: { $0.sourceID == source.id }) {
+                    if let out = outputs.first(where: { $0.id == conn.outputID }), out.isGroup {
+                        routeID = Self.derivedRouteID(from: conn.id, index: 0)
+                    } else {
+                        routeID = conn.id
+                    }
+                } else {
+                    routeID = nil
+                }
+                if let routeID { router.setRecorder(routeID: routeID, recorder) }
+            case .app(let bundleID):
+                let outputUID: String?
+                if source.followsSystemOutput {
+                    outputUID = systemAudio.defaultOutputUID
+                } else if let conn = connections.first(where: { $0.sourceID == source.id }),
+                          let out = outputs.first(where: { $0.id == conn.outputID }) {
+                    outputUID = out.isGroup ? out.groupMembers?.first : out.uid
+                } else {
+                    outputUID = nil
+                }
+                if let outputUID {
+                    appRedirectEngine.setRecorder(bundleID: bundleID, outputUID: outputUID, recorder)
+                }
+            }
+        }
+    }
+
+    /// Stable per-member route id for group fan-out: the connection id with the
+    /// member index folded into the last bytes, so reconciliation reuses the
+    /// same engines across applies instead of rebuilding them every time.
+    private static func derivedRouteID(from base: UUID, index: Int) -> UUID {
+        var bytes = base.uuid
+        bytes.14 = bytes.14 &+ UInt8(truncatingIfNeeded: index &+ 1)
+        bytes.15 = bytes.15 &+ UInt8(truncatingIfNeeded: (index &+ 1) &* 31)
+        return UUID(uuid: bytes)
     }
 
     // MARK: - Display helpers
@@ -601,6 +747,7 @@ final class MixerStore: ObservableObject {
         var colors: [String: Int]
         var deviceNicknames: [String: String]?
         var scenes: [MixScene]?
+        var customDeviceIcons: [String: String]?
     }
 
     private func schedulePersist() {
@@ -615,7 +762,8 @@ final class MixerStore: ObservableObject {
             inputs: inputs, outputs: outputs, connections: connections,
             colors: colors.mapValues { $0.rawValue },
             deviceNicknames: deviceNicknames,
-            scenes: scenes
+            scenes: scenes,
+            customDeviceIcons: customDeviceIcons
         )
         do {
             let data = try JSONEncoder().encode(payload)
@@ -636,6 +784,7 @@ final class MixerStore: ObservableObject {
         colors = payload.colors.compactMapValues { ChannelColor(rawValue: $0) }
         deviceNicknames = payload.deviceNicknames ?? [:]
         scenes = payload.scenes ?? []
+        customDeviceIcons = payload.customDeviceIcons ?? [:]
     }
 
     private static func defaultSaveURL() -> URL {

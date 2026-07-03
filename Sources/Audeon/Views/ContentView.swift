@@ -90,6 +90,7 @@ struct ContentView: View {
                     NSWorkspace.shared.open(url)
                 }
             }
+            Button("Show Recordings Folder") { store.revealRecordingsFolder() }
             Button("Capture System Audio (via BlackHole)") {
                 if !store.captureSystemAudio() {
                     let alert = NSAlert()
