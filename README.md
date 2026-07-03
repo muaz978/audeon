@@ -213,11 +213,21 @@ global show/hide shortcut (Option-Command-A) and opt-in Super Volume Keys
 (Accessibility), per-device custom icons, and VoiceOver labels across the
 canvas.
 
-Still planned, in rough priority order:
+Both top roadmap items landed since: the full EQ, overdrive, and Magic Boost
+chain now runs on cross-device routes too (a realtime manual-rendering
+AVAudioEngine inside the I/O proc), and the whole pipeline is verified end to
+end by machine: a generated tone is played into the virtual device, carried
+across the aggregate route, and analyzed on the far side for frequency and
+level (440 Hz in, 440 Hz out). That verification also uncovered and fixed the
+real cause of silent capture: the virtual sink's own driver-level volume and
+mute scale everything it stores, and the keyboard volume keys could zero them
+while the sink was the default output. Audeon now pins the sink at unity gain
+while capturing and guards it against outside changes, and every output card
+has a test tone button so a device can be checked by ear in isolation.
 
-1. Verify cross-device routing and system audio capture end to end by ear.
-2. Bring the EQ, overdrive, and Magic Boost chain to cross-device routes.
-3. Sign and notarize the app and driver for one-click installs.
+Still planned:
+
+1. Sign and notarize the app and driver for one-click installs.
 
 ## License
 

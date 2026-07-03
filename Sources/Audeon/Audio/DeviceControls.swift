@@ -88,6 +88,32 @@ extension AudioDeviceManager {
         return changed
     }
 
+    /// Pin a device's own controls to full volume and unmuted, on both scopes
+    /// and every element that exists. Used for the virtual capture sink: its
+    /// driver applies these controls to the audio it stores, so anything below
+    /// unity silently scales the whole system capture (the keyboard volume
+    /// keys hitting the sink while it is the default output zeroed it, which
+    /// made every downstream route carry silence).
+    func forceUnityGain(forUID uid: String) {
+        guard let id = deviceID(forUID: uid) else { return }
+        for scope in [kAudioObjectPropertyScopeOutput, kAudioObjectPropertyScopeInput] {
+            for element in [AudioObjectPropertyElement(kAudioObjectPropertyElementMain), 1, 2] {
+                var vAddr = AudioObjectPropertyAddress(
+                    mSelector: kAudioDevicePropertyVolumeScalar, mScope: scope, mElement: element)
+                if AudioObjectHasProperty(id, &vAddr) {
+                    var v: Float32 = 1.0
+                    AudioObjectSetPropertyData(id, &vAddr, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
+                }
+                var mAddr = AudioObjectPropertyAddress(
+                    mSelector: kAudioDevicePropertyMute, mScope: scope, mElement: element)
+                if AudioObjectHasProperty(id, &mAddr) {
+                    var m: UInt32 = 0
+                    AudioObjectSetPropertyData(id, &mAddr, 0, nil, UInt32(MemoryLayout<UInt32>.size), &m)
+                }
+            }
+        }
+    }
+
     private func volume(forUID uid: String, scope: AudioObjectPropertyScope) -> Float? {
         guard let id = deviceID(forUID: uid) else { return nil }
         if let v = Self.volume(id, element: kAudioObjectPropertyElementMain, scope: scope) { return v }

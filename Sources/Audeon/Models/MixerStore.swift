@@ -46,6 +46,8 @@ final class MixerStore: ObservableObject {
     let systemAudio: SystemAudioController
     let appManager: AppAudioManager
     let appRedirectEngine: AppRedirectEngine
+    /// Holds the virtual sink at unity gain while system audio capture is on.
+    private lazy var sinkGuard = SinkGuard(deviceManager: deviceManager)
 
     private var persistWork: DispatchWorkItem?
     private let saveURL: URL
@@ -172,6 +174,10 @@ final class MixerStore: ObservableObject {
                 connect(sourceID: source.id, outputID: outputID)
             }
         }
+        // The sink's driver-level volume and mute scale the audio it stores.
+        // Pin them at unity and keep them there, or a volume key press while
+        // the sink is the default output silences the entire capture.
+        sinkGuard.activate(uid: sink)
         systemAudioActive = true
     }
 
@@ -183,6 +189,7 @@ final class MixerStore: ObservableObject {
         guard let sink = deviceManager.systemAudioSinkUID,
               systemAudio.defaultOutputUID == sink,
               inputs.contains(where: { $0.kind == .device(sink) }) else { return }
+        sinkGuard.activate(uid: sink)
         systemAudioActive = true
     }
 
@@ -201,6 +208,7 @@ final class MixerStore: ObservableObject {
     /// Stop capturing system audio: restore the previous default output and
     /// remove the System Audio card.
     func disableSystemAudioCapture() {
+        sinkGuard.deactivate()
         let restore = previousDefaultOutputUID
             ?? deviceManager.outputs.first(where: { !deviceManager.isVirtualSystemAudio($0.uid) })?.uid
         if let restore { systemAudio.setDefaultOutput(restore) }
@@ -264,6 +272,18 @@ final class MixerStore: ObservableObject {
     func outputDisplayName(_ output: OutputTarget) -> String {
         if let name = output.groupName { return name }
         return deviceName(forUID: output.uid)
+    }
+
+    /// Play a short test tone through an output card's device (or through
+    /// every member of a group), bypassing the routing graph. Separates "the
+    /// device cannot make sound" from "the route is not working" by ear.
+    func playTestTone(for output: OutputTarget) {
+        let uids = output.groupMembers ?? [output.uid]
+        for uid in uids {
+            if let id = deviceManager.deviceID(forUID: uid) {
+                TestTonePlayer.shared.play(deviceID: id)
+            }
+        }
     }
 
     /// SF Symbol options offered in Settings for a device's custom icon.

@@ -25,6 +25,14 @@ The build is ad hoc signed. It loads on the machine that built it; a signed
 and notarized build for general distribution needs an Apple Developer
 membership and is planned.
 
+Known behavior: the device exposes its own volume and mute controls, and the
+driver applies them to the audio it stores. If the device is the system
+default output, the keyboard volume keys change those controls and scale the
+captured audio, all the way to silence at zero. The Audeon app pins the
+device at full volume, unmuted, while system audio capture is active and
+guards it against outside changes; anything else using the device directly
+should do the same.
+
 ## Install, verify, recover
 
 ```bash

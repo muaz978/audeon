@@ -273,6 +273,11 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
     private var running = false
     private var sampleRate: Double = 48000
 
+    /// The EQ + overdrive + Magic Boost chain, rendered manually inside the
+    /// I/O proc. nil when manual rendering is unavailable, in which case the
+    /// raw gain path below still carries audio.
+    private var dsp: CrossDeviceDSPChain?
+
     // Read by the audio thread every cycle, written by configure() on the main
     // thread. A single Float write is atomic enough for a gain value.
     private let gain = UnsafeMutablePointer<Float>.allocate(capacity: 1)
@@ -328,6 +333,11 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
         Thread.sleep(forTimeInterval: 0.05)
         sampleRate = Self.nominalSampleRate(aggregateID) ?? 48000
 
+        // The DSP chain (EQ, overdrive, Magic Boost) rendered inside the I/O
+        // proc. If it cannot start, the raw gain path below still carries
+        // audio, so a chain problem can never silence the route.
+        dsp = CrossDeviceDSPChain(sampleRate: sampleRate, maxFrames: 4096)
+
         configure(route)
 
         let gain = self.gain
@@ -335,9 +345,10 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
         let throttle = self.throttle
         let slot = self.recorderSlot
         let rate = self.sampleRate
+        let dsp = self.dsp
 
         let procStatus = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, nil) { _, inInput, _, outOutput, _ in
-            Self.render(input: inInput, output: outOutput, gain: gain.pointee,
+            Self.render(input: inInput, output: outOutput, gain: gain.pointee, dsp: dsp,
                         slot: slot, sampleRate: rate, throttle: throttle, onLevel: onLevel)
         }
         guard procStatus == noErr, let procID else {
@@ -353,12 +364,15 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
         NSLog("Audeon.route: STARTED cross route \(inputDeviceUID) -> \(outputDeviceUID) via I/O proc @\(Int(sampleRate))")
     }
 
-    /// The realtime callback body: copy the input device's channels to the
-    /// output device's channels with gain, repeating input channels as needed
-    /// (mono input fills a stereo output), metering and recording on the way.
+    /// The realtime callback body. With a DSP chain, the input is pulled
+    /// through EQ + overdrive + Magic Boost (volume and mute included, on the
+    /// chain's mixer) and the processed stereo result fans out to the output
+    /// channels. Without one, or if a cycle fails, the raw path copies input
+    /// to output with plain gain, so audio keeps flowing no matter what.
     private static func render(input: UnsafePointer<AudioBufferList>,
                                output: UnsafeMutablePointer<AudioBufferList>,
                                gain: Float,
+                               dsp: CrossDeviceDSPChain?,
                                slot: RecorderSlot,
                                sampleRate: Double,
                                throttle: MeterThrottle,
@@ -380,6 +394,26 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
             }
         }
 
+        // Processed stereo from the DSP chain, when available this cycle.
+        var processed: (left: UnsafePointer<Float>, right: UnsafePointer<Float>)?
+        var processedFrames = 0
+        if let dsp, !inChannels.isEmpty {
+            let frames = inChannels[0].frames
+            processed = dsp.process(frames: AVAudioFrameCount(frames)) { left, right, n in
+                let l = inChannels[0]
+                let r = inChannels.count > 1 ? inChannels[1] : inChannels[0]
+                let count = min(n, l.frames, r.frames)
+                for f in 0..<count {
+                    left[f] = l.base[f * l.stride]
+                    right[f] = r.base[f * r.stride]
+                }
+                if count < n {
+                    for f in count..<n { left[f] = 0; right[f] = 0 }
+                }
+            }
+            processedFrames = frames
+        }
+
         var sumSquares: Float = 0
         var peak: Float = 0
         var meterSamples = 0
@@ -392,9 +426,25 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
             let base = data.assumingMemoryBound(to: Float.self)
 
             for c in 0..<chs {
-                if inChannels.isEmpty {
+                if let processed {
+                    // DSP path: fan the processed stereo out (L, R, L, R...).
+                    let src = (globalOut % 2 == 0) ? processed.left : processed.right
+                    let n = min(frames, processedFrames)
+                    for f in 0..<n {
+                        let s = src[f]
+                        base[f * chs + c] = s
+                        sumSquares += s * s
+                        let a = abs(s)
+                        if a > peak { peak = a }
+                    }
+                    if n < frames {
+                        for f in n..<frames { base[f * chs + c] = 0 }
+                    }
+                    meterSamples += n
+                } else if inChannels.isEmpty {
                     for f in 0..<frames { base[f * chs + c] = 0 }
                 } else {
+                    // Raw path: direct copy with gain.
                     let src = inChannels[globalOut % inChannels.count]
                     let n = min(frames, src.frames)
                     for f in 0..<n {
@@ -414,18 +464,26 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
         }
 
         if let recorder = slot.recorder, !inChannels.isEmpty {
-            // Deinterleave the post-gain signal for the file. Only taken while
-            // actually recording, so the steady-state path stays copy-free.
-            let frames = inChannels[0].frames
-            let chCount = min(inChannels.count, 2)
-            var copies: [[Float]] = []
-            for c in 0..<chCount {
-                let src = inChannels[c]
-                var channel = [Float](repeating: 0, count: frames)
-                for f in 0..<min(frames, src.frames) { channel[f] = src.base[f * src.stride] * gain }
-                copies.append(channel)
+            // Only taken while actually recording, so the steady-state path
+            // stays copy-free. Records exactly what is sent to the output.
+            if let processed {
+                let frames = processedFrames
+                var left = [Float](repeating: 0, count: frames)
+                var right = [Float](repeating: 0, count: frames)
+                for f in 0..<frames { left[f] = processed.left[f]; right[f] = processed.right[f] }
+                recorder.append(deinterleaved: [left, right], sampleRate: sampleRate)
+            } else {
+                let frames = inChannels[0].frames
+                let chCount = min(inChannels.count, 2)
+                var copies: [[Float]] = []
+                for c in 0..<chCount {
+                    let src = inChannels[c]
+                    var channel = [Float](repeating: 0, count: frames)
+                    for f in 0..<min(frames, src.frames) { channel[f] = src.base[f * src.stride] * gain }
+                    copies.append(channel)
+                }
+                recorder.append(deinterleaved: copies, sampleRate: sampleRate)
             }
-            recorder.append(deinterleaved: copies, sampleRate: sampleRate)
         }
 
         if meterSamples > 0, throttle.shouldFire() {
@@ -435,9 +493,10 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
     }
 
     func configure(_ route: Route) {
-        // Gain and mute apply on this path; EQ, overdrive, and Magic Boost do
-        // not yet (documented in the README roadmap).
+        // The raw fallback path applies this gain; the DSP chain applies
+        // volume, mute, EQ, overdrive, and Magic Boost itself.
         gain.pointee = route.isMuted ? 0 : Float(route.volume)
+        dsp?.configure(route)
     }
 
     func stop() {

@@ -124,6 +124,26 @@ final class SuperVolumeKeys {
     @MainActor private func apply(_ keyCode: Int) {
         let store = MixerStore.shared
         guard let uid = store.systemAudio.defaultOutputUID else { return }
+
+        // While system audio capture is on, the default output is the virtual
+        // sink and its controls are pinned at unity (they scale the capture
+        // itself). Steer the System Audio card's volume instead, which is the
+        // real master level of everything the user hears.
+        if store.deviceManager.isVirtualSystemAudio(uid) {
+            guard let source = store.inputs.first(where: { $0.kind == .device(uid) }) else { return }
+            switch keyCode {
+            case Self.soundUp:
+                store.updateInput(source.id) { $0.volume = min(1, $0.volume + 1.0 / 16.0); $0.isMuted = false }
+            case Self.soundDown:
+                store.updateInput(source.id) { $0.volume = max(0, $0.volume - 1.0 / 16.0) }
+            case Self.mute:
+                store.updateInput(source.id) { $0.isMuted.toggle() }
+            default:
+                break
+            }
+            return
+        }
+
         let dm = store.deviceManager
         let current = dm.outputVolume(forUID: uid) ?? 0
         switch keyCode {

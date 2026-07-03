@@ -610,6 +610,12 @@ private struct OutputCard: View {
                         .buttonStyle(.borderless)
                         .help("This device's own volume is muted or at 0%, outside of Audeon. Click to unmute and raise it.")
                     }
+                    Button { store.playTestTone(for: output) } label: {
+                        Image(systemName: "waveform").font(.system(size: 13)).foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Play a short test tone through this output, bypassing routing. If you hear it, the device works and any silence is a routing question.")
+                    .accessibilityLabel("Play test tone through \(name)")
                     colorMenu
                     Button { withAnimation { store.removeOutput(output.id) } } label: {
                         Image(systemName: "xmark.circle.fill").font(.system(size: 16)).foregroundStyle(.secondary)
