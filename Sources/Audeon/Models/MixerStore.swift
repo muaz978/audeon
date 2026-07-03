@@ -58,6 +58,7 @@ final class MixerStore: ObservableObject {
         self.appRedirectEngine = AppRedirectEngine(deviceManager: dm)
         self.saveURL = Self.defaultSaveURL()
         load()
+        adoptSystemAudioStateOnLaunch()
         applyGraph()
 
         for child in [dm.objectWillChange.eraseToAnyPublisher(),
@@ -170,6 +171,29 @@ final class MixerStore: ObservableObject {
             }
         }
         systemAudioActive = true
+    }
+
+    /// Called on launch: if the system default output is still the virtual sink
+    /// and the System Audio card exists, a previous session left the bridge on
+    /// (or quit unexpectedly). Reflect that in the UI state so the menu offers
+    /// "Stop capturing" instead of pretending the bridge is off.
+    func adoptSystemAudioStateOnLaunch() {
+        guard let sink = deviceManager.systemAudioSinkUID,
+              systemAudio.defaultOutputUID == sink,
+              inputs.contains(where: { $0.kind == .device(sink) }) else { return }
+        systemAudioActive = true
+    }
+
+    /// Called when the app is quitting. With Audeon gone nothing drains the
+    /// virtual sink, so leaving it as the system default would silence the
+    /// whole Mac. Point the default back at a real output; keep the card and
+    /// connections so the setup is one click away next launch.
+    func restoreSystemOutputForQuit() {
+        guard systemAudioActive else { return }
+        let restore = previousDefaultOutputUID
+            ?? outputs.first(where: { !deviceManager.isVirtualSystemAudio($0.uid) })?.uid
+            ?? deviceManager.outputs.first(where: { !deviceManager.isVirtualSystemAudio($0.uid) })?.uid
+        if let restore { systemAudio.setDefaultOutput(restore) }
     }
 
     /// Stop capturing system audio: restore the previous default output and
@@ -540,14 +564,32 @@ final class MixerStore: ObservableObject {
         }
     }
 
+    /// Resolved app icons keyed by bundle id. Published so every card refreshes
+    /// the moment an icon becomes available: NSRunningApplication.icon is
+    /// loaded lazily by AppKit and never invalidates SwiftUI on its own, which
+    /// left freshly added cards iconless until a click forced a re-render.
+    @Published private var appIcons: [String: NSImage] = [:]
+
     func icon(for source: InputSource) -> NSImage? {
         guard case .app(let bundleID) = source.kind else { return nil }
-        if let img = appManager.apps.first(where: { $0.bundleID == bundleID })?.icon { return img }
-        // Resolve from the installed app bundle so closed apps still show an icon.
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
-            return NSWorkspace.shared.icon(forFile: url.path)
-        }
+        if let cached = appIcons[bundleID] { return cached }
+        resolveIcon(bundleID)
         return nil
+    }
+
+    /// Resolve an icon once, off the current view update (mutating published
+    /// state while SwiftUI evaluates a body is not allowed), then cache it.
+    private func resolveIcon(_ bundleID: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.appIcons[bundleID] == nil else { return }
+            // The installed bundle lookup is deterministic and works for
+            // closed apps too; the running-app icon is only a fallback.
+            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+                self.appIcons[bundleID] = NSWorkspace.shared.icon(forFile: url.path)
+            } else if let img = self.appManager.apps.first(where: { $0.bundleID == bundleID })?.icon {
+                self.appIcons[bundleID] = img
+            }
+        }
     }
 
     // MARK: - Persistence

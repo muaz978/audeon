@@ -5,20 +5,41 @@ to the system, so apps like OBS, Discord, and Zoom can select it directly,
 and so all system audio can be funneled into Audeon by picking it as the
 default output.
 
-## Status: Stage 0 (in-process testing only)
+## Status: Stage 2 (installable on a real machine)
 
-Nothing here installs anything. The driver is developed against a staged
-safety plan, because a HAL plug-in loads into coreaudiod, the system audio
-daemon, where a bug disrupts audio for the whole machine:
+The driver was developed against a staged safety plan, because a HAL plug-in
+loads into coreaudiod, the system audio daemon, where a bug disrupts audio
+for the whole machine:
 
-- Stage 0 (this directory, done): the driver is compiled directly into test
-  executables and driven through the full AudioServerPlugIn interface the way
-  coreaudiod would, including a StartIO / write / read-back / StopIO cycle
-  that verifies bit-identical loopback. A crash kills only the test process.
-- Stage 1 (next): install into a disposable macOS virtual machine and hammer
-  it there. The host Mac never loads the plug-in.
-- Stage 2 (last): install on a real machine, with a prepared one-command
-  recovery script.
+- Stage 0 (done): the driver is compiled directly into test executables and
+  driven through the full AudioServerPlugIn interface the way coreaudiod
+  would, including a StartIO / write / read-back / StopIO cycle that verifies
+  bit-identical loopback. A crash kills only the test process.
+- Stage 1 (skipped by the maintainer's choice): a disposable macOS virtual
+  machine round.
+- Stage 2 (current): installable on a real machine with a one-command
+  recovery script. The device registers and coreaudiod stays healthy;
+  wider real-world listening verification is ongoing.
+
+The build is ad hoc signed. It loads on the machine that built it; a signed
+and notarized build for general distribution needs an Apple Developer
+membership and is planned.
+
+## Install, verify, recover
+
+```bash
+cd Driver
+./build-driver.sh                     # build build/AudeonAudio.driver
+sudo ./install-driver.sh              # copy into /Library/Audio/Plug-Ins/HAL and restart coreaudiod
+swift Tests/verify_installed.swift    # confirm the device registered (no sudo needed)
+```
+
+If system audio ever misbehaves after installing, one command returns the
+Mac to normal:
+
+```bash
+sudo ./recover-audio.sh
+```
 
 ## Layout
 
@@ -27,12 +48,15 @@ daemon, where a bug disrupts audio for the whole machine:
 - `AudeonDriverConfig.h` - the Audeon branding and device configuration. The
   single source of truth used by both the build and the tests.
 - `build-driver.sh` - builds `build/AudeonAudio.driver`. Build only, no install.
+- `install-driver.sh` - installs the built bundle system-wide (needs sudo).
+- `recover-audio.sh` - removes the driver and restarts coreaudiod (needs sudo).
 - `Tests/harness.c` - in-process interface, robustness, and loopback tests.
 - `Tests/bundle_load.c` - loads the built bundle via CFPlugIn, the same
   mechanism coreaudiod uses, and verifies factory registration and identity.
-- `run-stage0.sh` - builds everything and runs both test programs.
+- `Tests/verify_installed.swift` - post-install check against live CoreAudio.
+- `run-stage0.sh` - builds everything and runs both in-process test programs.
 
-## Run Stage 0
+## Run the in-process tests
 
 ```bash
 cd Driver

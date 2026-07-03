@@ -44,6 +44,10 @@ final class AppRedirectEngine: ObservableObject {
     func apply(_ requests: [AppTapRequest]) {
         lock.lock(); defer { lock.unlock() }
 
+        // A new reconciliation supersedes any previous failure. Without this,
+        // one stale error banner stayed on screen forever.
+        DispatchQueue.main.async { if self.lastError != nil { self.lastError = nil } }
+
         var wanted: [String: AppTapRequest] = [:]
         for r in requests where deviceManager.deviceID(forUID: r.outputUID) != nil {
             wanted[key(r.bundleID, r.outputUID)] = r
@@ -124,15 +128,28 @@ private final class TapUnit {
         self.processes = request.processObjects
         self.onLevel = onLevel
 
-        guard #available(macOS 14.2, *) else { cleanup(); return nil }
-        guard !request.processObjects.isEmpty else { cleanup(); return nil }
+        guard #available(macOS 14.2, *) else {
+            NSLog("Audeon.route: tap unavailable, needs macOS 14.2+ (\(request.bundleID))")
+            cleanup(); return nil
+        }
+        guard !request.processObjects.isEmpty else {
+            NSLog("Audeon.route: no audio processes yet for \(request.bundleID); waiting for it to play")
+            cleanup(); return nil
+        }
 
         // Tap every audio process the app owns (all of a browser's tabs), mixed
         // down together, so nothing the app plays is missed.
         let desc = CATapDescription(stereoMixdownOfProcesses: request.processObjects)
         desc.muteBehavior = .muted
-        guard AudioHardwareCreateProcessTap(desc, &tapID) == noErr, tapID != 0 else { cleanup(); return nil }
-        guard let tapUID = Self.cfString(tapID, kAudioTapPropertyUID) else { cleanup(); return nil }
+        let tapStatus = AudioHardwareCreateProcessTap(desc, &tapID)
+        guard tapStatus == noErr, tapID != 0 else {
+            NSLog("Audeon.route: process tap create failed for \(request.bundleID) (status \(tapStatus))")
+            cleanup(); return nil
+        }
+        guard let tapUID = Self.cfString(tapID, kAudioTapPropertyUID) else {
+            NSLog("Audeon.route: could not read tap UID for \(request.bundleID)")
+            cleanup(); return nil
+        }
 
         let aggUID = "\(audeonAggregateUIDPrefix)\(request.processObjects.first ?? 0).\(UInt32.random(in: 1...UInt32.max))"
         let aggDesc: [String: Any] = [
@@ -147,12 +164,19 @@ private final class TapUnit {
                 kAudioSubTapUIDKey as String: tapUID
             ]]
         ]
-        guard AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &aggregateID) == noErr,
-              aggregateID != 0 else { cleanup(); return nil }
+        let aggStatus = AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &aggregateID)
+        guard aggStatus == noErr, aggregateID != 0 else {
+            NSLog("Audeon.route: aggregate create failed for \(request.bundleID) -> \(request.outputUID) (status \(aggStatus))")
+            cleanup(); return nil
+        }
 
         // Bind the engine's input and output to the aggregate (tap in, device out).
-        guard Self.setDevice(engine.inputNode.audioUnit, aggregateID) == noErr,
-              Self.setDevice(engine.outputNode.audioUnit, aggregateID) == noErr else { cleanup(); return nil }
+        let bindIn = Self.setDevice(engine.inputNode.audioUnit, aggregateID)
+        let bindOut = Self.setDevice(engine.outputNode.audioUnit, aggregateID)
+        guard bindIn == noErr, bindOut == noErr else {
+            NSLog("Audeon.route: engine bind failed for \(request.bundleID) (in \(bindIn), out \(bindOut))")
+            cleanup(); return nil
+        }
 
         for (i, f) in AudioEQ.frequencies.enumerated() {
             let band = eq.bands[i]

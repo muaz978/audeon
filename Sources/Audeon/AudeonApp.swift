@@ -40,6 +40,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let popover = NSPopover()
     private var onboardingWindow: NSWindow?
 
+    func applicationWillTerminate(_ notification: Notification) {
+        // If the System Audio bridge is on, nothing will drain the virtual sink
+        // once Audeon is gone; leaving it as the system default would silence
+        // the whole Mac. Hand the default back to a real output on the way out.
+        MixerStore.shared.restoreSystemOutputForQuit()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         popover.behavior = .transient
         let hosting = NSHostingController(

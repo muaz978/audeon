@@ -37,6 +37,10 @@ final class AudioRouter: ObservableObject {
     func apply(routes: [Route]) {
         lock.lock(); defer { lock.unlock() }
 
+        // A new reconciliation supersedes any previous failure. Without this,
+        // one stale error banner stayed on screen forever.
+        DispatchQueue.main.async { if self.lastError != nil { self.lastError = nil } }
+
         let wanted = Set(routes.map(\.id))
         for (id, engine) in engines where !wanted.contains(id) {
             engine.stop(); engines[id] = nil

@@ -39,19 +39,28 @@ One canvas, the way the original works:
   AVAudioEngine with a 10 band EQ. Application sources are captured with a Core
   Audio process tap and replayed directly to the chosen output, so you can send
   one app to your headphones only.
-- Per input volume, mute, a 1x to 4x volume boost, and a 10 band EQ with presets.
-- Per output volume and mute.
+- Per input volume, mute, a 1x to 4x volume boost, a 10 band EQ with presets,
+  and Magic Boost, a dynamics compressor that lifts quiet audio and tames peaks.
+- Per output volume and mute, and live level meters on cards and in the menu bar.
+- Capture whole-system audio in one click: with the Audeon virtual driver (see
+  `Driver/`) or the free BlackHole driver installed, "Capture system audio"
+  funnels everything the Mac plays into one System Audio card, auto-routed to
+  the speakers you were using, ready to fan out anywhere.
 - Connect one input to several outputs. Each input lists its connected outputs,
   and you can disconnect any one of them from the card.
 - Click a cable to delete just that connection.
 - Drag inputs or outputs to reorder them.
-- Hide inactive applications in the Add input list.
+- Scenes: save a whole routing setup and recall it in one click.
+- Follow System Output: a source can track the default output automatically.
+- Favorites, and hiding inactive applications.
 - Color customizable cards and cables, with smooth animations, saved between
   launches.
-- A tabbed Settings window: start at login, theme, system default devices, and a
-  cleanup tool for leftover capture devices.
-- A menu bar panel to tweak each input's volume, mute, and boost without opening
-  the window.
+- A tabbed Settings window: start at login, theme, system default devices,
+  per-device nickname, volume, sample rate and channel mapping, and a cleanup
+  tool for leftover capture devices.
+- A menu bar popover with quick controls for every input and output, in full
+  and compact layouts.
+- A first run welcome screen that walks through permissions.
 
 ## Requirements
 
@@ -69,9 +78,9 @@ launch it:
 
 ```bash
 cd ~/Downloads
-unzip -o Audeon-0.1.0-macos.zip
+unzip -o Audeon-*-macos.zip
 xattr -dr com.apple.quarantine Audeon.app
-mv Audeon.app /Applications/
+rm -rf /Applications/Audeon.app && mv Audeon.app /Applications/
 open /Applications/Audeon.app
 ```
 
@@ -123,8 +132,14 @@ System Settings > Privacy & Security > Microphone.
    click the source pin and then click an output pin. A cable is drawn and audio
    flows.
 4. Connect as many cables as you like. Several inputs can feed one output.
-5. Use each card's slider and mute button to set levels.
-6. Set the system default Output, Input, and Sound Effects devices in Settings.
+5. Use each card's slider and mute button to set levels, and the chevron for
+   EQ, volume overdrive, and Magic Boost.
+6. To grab everything the Mac plays at once, install the virtual driver (see
+   `Driver/README.md`) or BlackHole, then click Add input, then
+   "Capture system audio". Quitting Audeon hands the system output back to
+   your real speakers automatically.
+7. Save the whole layout as a Scene and recall it any time.
+8. Set the system default Output, Input, and Sound Effects devices in Settings.
 
 ## Keyboard shortcuts
 
@@ -143,14 +158,19 @@ System Settings > Privacy & Security > Microphone.
 | `Audio/AppAudioManager.swift` | Auto-detects running apps via the Core Audio process object list |
 | `Audio/AppRedirectEngine.swift` | Per app and output process tap, private aggregate device, gain passthrough |
 | `Audio/SystemAudioController.swift` | Reads and sets the default Output, Input, and Sound Effects devices |
-| `Audio/DeviceControls.swift` | Per-device volume and sample rate |
+| `Audio/DeviceControls.swift` | Per-device volume, sample rate, and stereo channel mapping |
+| `Audio/AudioEQ.swift` | The shared 10 band EQ definitions and presets |
+| `Audio/MagicBoost.swift` | The dynamics compressor behind Magic Boost |
+| `Audio/AudioMeter.swift` | dBFS metering with clip detection and UI throttling |
 | `Models/GraphModels.swift` | Input sources, output targets, and connection value types |
 | `Models/MixerStore.swift` | Graph state, persistence, drag-connect, and engine sync |
 | `Models/Route.swift` | Route and color palette used by the device router |
 | `Views/RoutingCanvasView.swift` | The canvas: Add input or output, cards, pins, and cables |
-| `Views/ContentView.swift` | Window chrome and the menu button |
-| `Views/SettingsView.swift` | Settings sheet with system default device pickers |
-| `AudeonApp.swift` | App entry point, native menus, and the menu bar control |
+| `Views/ContentView.swift` | Window chrome, the menu button, and the Scenes menu |
+| `Views/SettingsView.swift` | Tabbed settings: general, devices, appearance, audio |
+| `Views/OnboardingView.swift` | First run welcome and permissions screen |
+| `AudeonApp.swift` | App entry point, menus, and the menu bar popover |
+| `Driver/` | The Audeon virtual audio driver (GPL-3.0, see its README) |
 
 The canvas (inputs, outputs, connections, and colors) is stored in
 `~/Library/Application Support/Audeon/graph.json`.
@@ -176,18 +196,22 @@ where the input and output are the same device, and all per-app capture and
 redirect, are unaffected. This needs real-world listening verification, which
 is tracked as the top priority below.
 
+The virtual driver has shipped its first working stage: `Driver/` builds an
+Audeon-branded AudioServerPlugIn (based on the BlackHole source, GPL-3.0)
+that installs as an "Audeon Stream" device, with install, verify, and
+one-command recovery scripts. The app detects it and uses it for one-click
+system audio capture; OBS, Discord, and Zoom can select it directly. It is
+ad hoc signed for now, so it loads on the machine that built it; a notarized
+build for general distribution needs an Apple Developer membership.
+
 Still planned, in rough priority order:
 
-1. Verify and, if needed, rework cross-device hardware routing using a lower
-   level technique (a direct I/O proc on the aggregate device, the same
-   primitive already used for per-app capture) instead of binding
-   AVAudioEngine's shared input/output unit to the aggregate.
-2. Output Groups, so one app can play to several devices at once.
-3. Present Audeon as a virtual device for OBS, Streamlabs, and Discord. In
-   progress in `Driver/`: an AudioServerPlugIn built on the BlackHole source
-   (GPL-3.0, see `Driver/README.md`), currently at Stage 0 of a staged safety
-   plan (in-process tests only, nothing installed). Until it ships, the
-   onboarding screen detects and recommends the BlackHole driver itself.
+1. Verify cross-device hardware routing end to end by ear, and if needed
+   rework it on a direct I/O proc on the aggregate device (the same primitive
+   already proven for per-app capture) instead of binding AVAudioEngine's
+   shared input/output unit to the aggregate.
+2. Sign and notarize the app and driver for one-click installs.
+3. Output Groups, so one app can play to several devices at once.
 4. Recording a mix to a file, reusing the existing tap pipeline.
 5. Super volume keys and a global show or hide shortcut, both opt in and both
    needing Accessibility access.
@@ -195,4 +219,7 @@ Still planned, in rough priority order:
 
 ## License
 
-MIT. See `LICENSE`.
+The app is MIT licensed, see `LICENSE`. The virtual driver under `Driver/` is
+GPL-3.0 because it builds on the BlackHole source; see `Driver/README.md`.
+The app does not link against the driver, it only sees the resulting
+CoreAudio device like any other.
