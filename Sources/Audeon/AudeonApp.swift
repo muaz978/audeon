@@ -57,10 +57,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController = hosting
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.behavior = .removalAllowed
+        statusItem.isVisible = true
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "Audeon")
+            if let image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "Audeon") {
+                image.isTemplate = true
+                button.image = image
+            } else {
+                // If the symbol is ever unavailable, a nil image leaves a
+                // zero-width, invisible button. A title guarantees the item is
+                // visible and clickable.
+                button.title = "Audeon"
+            }
+            button.toolTip = "Audeon"
             button.action = #selector(togglePopover(_:))
             button.target = self
+            NSLog("Audeon.menubar: status item created (image \(button.image != nil ? "set" : "nil, using title"))")
+        } else {
+            NSLog("Audeon.menubar: status item has no button; menu bar may be full or hidden")
         }
 
         // Reopen onboarding on request (from Settings).

@@ -273,6 +273,15 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
     private var running = false
     private var sampleRate: Double = 48000
 
+    /// How many leading channels of the aggregate's input stream belong to the
+    /// OUTPUT device rather than the input device. The aggregate lists the
+    /// output sub-device first, so when that device is duplex (an interface, a
+    /// virtual device, anything with its own inputs) its input channels sit
+    /// ahead of the real source. Skipping them is the whole reason a route to a
+    /// duplex output used to fall silent while a route to the built-in speakers
+    /// (no inputs) worked.
+    private var inputChannelOffset = 0
+
     /// The EQ + overdrive + Magic Boost chain, rendered manually inside the
     /// I/O proc. nil when manual rendering is unavailable, in which case the
     /// raw gain path below still carries audio.
@@ -333,6 +342,11 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
         Thread.sleep(forTimeInterval: 0.05)
         sampleRate = Self.nominalSampleRate(aggregateID) ?? 48000
 
+        // The output sub-device is listed first, so its own input channels (if
+        // it is a duplex device) lead the aggregate's input stream. The real
+        // source begins right after them.
+        inputChannelOffset = Self.inputChannelCount(outputDeviceID)
+
         // The DSP chain (EQ, overdrive, Magic Boost) rendered inside the I/O
         // proc. If it cannot start, the raw gain path below still carries
         // audio, so a chain problem can never silence the route.
@@ -346,10 +360,11 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
         let slot = self.recorderSlot
         let rate = self.sampleRate
         let dsp = self.dsp
+        let offset = self.inputChannelOffset
 
         let procStatus = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, nil) { _, inInput, _, outOutput, _ in
             Self.render(input: inInput, output: outOutput, gain: gain.pointee, dsp: dsp,
-                        slot: slot, sampleRate: rate, throttle: throttle, onLevel: onLevel)
+                        slot: slot, sampleRate: rate, inputOffset: offset, throttle: throttle, onLevel: onLevel)
         }
         guard procStatus == noErr, let procID else {
             NSLog("Audeon.route: FAILED cross route ioproc \(inputDeviceUID) -> \(outputDeviceUID) (status \(procStatus))")
@@ -361,7 +376,7 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
             throw RouteEngineError.deviceStart(startStatus)
         }
         running = true
-        NSLog("Audeon.route: STARTED cross route \(inputDeviceUID) -> \(outputDeviceUID) via I/O proc @\(Int(sampleRate))")
+        NSLog("Audeon.route: STARTED cross route \(inputDeviceUID) -> \(outputDeviceUID) via I/O proc @\(Int(sampleRate)), skipping \(inputChannelOffset) output-side input channel(s)")
     }
 
     /// The realtime callback body. With a DSP chain, the input is pulled
@@ -375,6 +390,7 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
                                dsp: CrossDeviceDSPChain?,
                                slot: RecorderSlot,
                                sampleRate: Double,
+                               inputOffset: Int,
                                throttle: MeterThrottle,
                                onLevel: @escaping (MeterReading) -> Void) {
         let inList = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
@@ -382,17 +398,23 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
 
         // Flatten the input side into logical channels (a stream buffer can
         // carry several interleaved channels).
-        var inChannels: [(base: UnsafePointer<Float>, stride: Int, frames: Int)] = []
-        inChannels.reserveCapacity(8)
+        var allInChannels: [(base: UnsafePointer<Float>, stride: Int, frames: Int)] = []
+        allInChannels.reserveCapacity(8)
         for buf in inList {
             guard let data = buf.mData, buf.mNumberChannels > 0 else { continue }
             let chs = Int(buf.mNumberChannels)
             let frames = Int(buf.mDataByteSize) / (MemoryLayout<Float>.size * chs)
             let base = data.assumingMemoryBound(to: Float.self)
             for c in 0..<chs {
-                inChannels.append((base: UnsafePointer(base) + c, stride: chs, frames: frames))
+                allInChannels.append((base: UnsafePointer(base) + c, stride: chs, frames: frames))
             }
         }
+
+        // Drop the leading channels that belong to a duplex output device, so
+        // what remains is the real source. Clamp defensively: never skip so far
+        // that nothing is left, or the route would silence itself.
+        let skip = inputOffset < allInChannels.count ? inputOffset : 0
+        let inChannels = Array(allInChannels[skip...])
 
         // Processed stereo from the DSP chain, when available this cycle.
         var processed: (left: UnsafePointer<Float>, right: UnsafePointer<Float>)?
@@ -507,6 +529,23 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
         }
         running = false
         if aggregateID != 0 { AudioHardwareDestroyAggregateDevice(aggregateID); aggregateID = 0 }
+    }
+
+    /// Total input channels a device exposes, used to find where the real
+    /// source begins inside the aggregate's combined input stream.
+    private static func inputChannelCount(_ device: AudioObjectID) -> Int {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamConfiguration,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(device, &addr, 0, nil, &size) == noErr, size > 0 else { return 0 }
+        let raw = UnsafeMutableRawPointer.allocate(
+            byteCount: Int(size), alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { raw.deallocate() }
+        guard AudioObjectGetPropertyData(device, &addr, 0, nil, &size, raw) == noErr else { return 0 }
+        let abl = UnsafeMutableAudioBufferListPointer(raw.assumingMemoryBound(to: AudioBufferList.self))
+        return abl.reduce(0) { $0 + Int($1.mNumberChannels) }
     }
 
     private static func nominalSampleRate(_ device: AudioObjectID) -> Double? {
