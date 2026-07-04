@@ -16,6 +16,7 @@ rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
 
 echo ">> compiling driver (vendored BlackHole source + Audeon branding)"
+# Universal binary (Apple Silicon + Intel) so one download runs on any Mac.
 clang -bundle \
     -o "$BIN" \
     -include AudeonDriverConfig.h \
@@ -23,6 +24,7 @@ clang -bundle \
     -framework CoreAudio \
     -framework CoreFoundation \
     -framework Accelerate \
+    -arch arm64 -arch x86_64 \
     -mmacosx-version-min=13.0 \
     -O2 \
     -Wno-deprecated-declarations

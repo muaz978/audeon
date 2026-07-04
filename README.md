@@ -134,10 +134,16 @@ System Settings > Privacy & Security > Microphone.
 4. Connect as many cables as you like. Several inputs can feed one output.
 5. Use each card's slider and mute button to set levels, and the chevron for
    EQ, volume overdrive, and Magic Boost.
-6. To grab everything the Mac plays at once, install the virtual driver (see
-   `Driver/README.md`) or BlackHole, then click Add input, then
-   "Capture system audio". Quitting Audeon hands the system output back to
-   your real speakers automatically.
+6. To grab everything the Mac plays at once, you need a virtual audio device.
+   Two ways to get one:
+   - Download `Audeon-Driver-macos.zip` from the latest release, unzip it, and
+     run `sudo ./install.sh`. It is a universal (Apple Silicon and Intel)
+     build. It is ad-hoc signed rather than notarized, so it loads on most
+     Macs but a few with stricter or managed security may refuse it.
+   - Or install the free, notarized BlackHole driver
+     (https://existential.audio/blackhole/), which works everywhere.
+   Then click Add input, then "Capture system audio". Quitting Audeon hands the
+   system output back to your real speakers automatically.
 7. Save the whole layout as a Scene and recall it any time.
 8. Set the system default Output, Input, and Sound Effects devices in Settings.
 

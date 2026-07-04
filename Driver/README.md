@@ -33,11 +33,30 @@ device at full volume, unmuted, while system audio capture is active and
 guards it against outside changes; anything else using the device directly
 should do the same.
 
-## Install, verify, recover
+## Install a prebuilt download (no toolchain needed)
+
+Most people should just grab the prebuilt driver from the latest release. It is
+a universal build (Apple Silicon and Intel):
+
+```bash
+cd ~/Downloads
+unzip -o Audeon-Driver-macos.zip
+cd Audeon-Driver
+sudo ./install.sh                     # clears quarantine, installs, restarts coreaudiod
+```
+
+`sudo ./uninstall.sh` removes it again. The prebuilt bundle is ad-hoc signed,
+not notarized, so the installer clears the download quarantine for you and it
+loads on most Macs; a few with stricter or MDM-managed security may still
+refuse an un-notarized system driver, in which case use the free notarized
+BlackHole driver (https://existential.audio/blackhole/), which Audeon supports
+the same way. `Driver/package-driver.sh` is what produces this zip.
+
+## Build and install from source
 
 ```bash
 cd Driver
-./build-driver.sh                     # build build/AudeonAudio.driver
+./build-driver.sh                     # build build/AudeonAudio.driver (universal)
 sudo ./install-driver.sh              # copy into /Library/Audio/Plug-Ins/HAL and restart coreaudiod
 swift Tests/verify_installed.swift    # confirm the device registered (no sudo needed)
 ```
@@ -55,7 +74,8 @@ sudo ./recover-audio.sh
   (GPL-3.0), which is engineered to be rebranded via preprocessor definitions.
 - `AudeonDriverConfig.h` - the Audeon branding and device configuration. The
   single source of truth used by both the build and the tests.
-- `build-driver.sh` - builds `build/AudeonAudio.driver`. Build only, no install.
+- `build-driver.sh` - builds `build/AudeonAudio.driver` (universal). Build only, no install.
+- `package-driver.sh` - builds and assembles the downloadable installer zip.
 - `install-driver.sh` - installs the built bundle system-wide (needs sudo).
 - `recover-audio.sh` - removes the driver and restarts coreaudiod (needs sudo).
 - `Tests/harness.c` - in-process interface, robustness, and loopback tests.
