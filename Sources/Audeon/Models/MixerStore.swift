@@ -254,16 +254,36 @@ final class MixerStore: ObservableObject {
     /// that has been unplugged since we remembered it -- all three make
     /// `setDefaultOutput` a silent no-op that strands the Mac on the sink.
     private func restoreCandidates() -> [String] {
+        Self.restoreOrder(
+            remembered: previousDefaultOutputUID,
+            plainCardUIDs: outputs.filter { $0.groupMembers == nil }.map(\.uid),
+            groupMemberUIDs: outputs.flatMap { $0.groupMembers ?? [] },
+            deviceUIDs: deviceManager.outputs.map(\.uid),
+            isUsable: { [deviceManager] uid in deviceManager.isUsableOutput(uid) })
+    }
+
+    /// The ordering rule behind `restoreCandidates()`, kept free of CoreAudio so
+    /// it can be tested directly. Order matters: the output the user was on
+    /// before the bridge took over comes first, then plain output cards, then
+    /// devices inside Output Groups, then anything else the system reports.
+    /// `isUsable` is what keeps a synthetic group uid, an unplugged device, or
+    /// the capture sink itself out of the list -- handing the system default to
+    /// any of those is a silent no-op that leaves the Mac with no sound.
+    nonisolated static func restoreOrder(remembered: String?,
+                             plainCardUIDs: [String],
+                             groupMemberUIDs: [String],
+                             deviceUIDs: [String],
+                             isUsable: (String) -> Bool) -> [String] {
         var seen = Set<String>()
         var result: [String] = []
         func add(_ uid: String?) {
-            guard let uid, deviceManager.isUsableOutput(uid), seen.insert(uid).inserted else { return }
+            guard let uid, isUsable(uid), seen.insert(uid).inserted else { return }
             result.append(uid)
         }
-        add(previousDefaultOutputUID)
-        for output in outputs where output.groupMembers == nil { add(output.uid) }
-        for output in outputs { for member in output.groupMembers ?? [] { add(member) } }
-        for device in deviceManager.outputs { add(device.uid) }
+        add(remembered)
+        for uid in plainCardUIDs { add(uid) }
+        for uid in groupMemberUIDs { add(uid) }
+        for uid in deviceUIDs { add(uid) }
         return result
     }
 
@@ -554,16 +574,32 @@ final class MixerStore: ObservableObject {
         // index into the full array, so with "Hide inactive" on every downward
         // drag resolved to the same slot and appeared to do nothing. Anchor to
         // the last visible card above the pointer instead.
-        let visible = visibleInputs.filter { $0.id != draggedID }
-        let above = visible.filter { (pinFrames[$0.pinKey]?.y ?? .greatestFiniteMagnitude) < y }
-        guard let from = inputs.firstIndex(where: { $0.id == draggedID }) else { return }
-        var arr = inputs
-        let item = arr.remove(at: from)
-        let insert = above.last.flatMap { anchor in
-            arr.firstIndex(where: { $0.id == anchor.id }).map { $0 + 1 }
-        } ?? 0
-        arr.insert(item, at: min(insert, arr.count))
-        if arr != inputs { inputs = arr }
+        let visibleIDs = visibleInputs.map(\.id)
+        var pinY: [UUID: CGFloat] = [:]
+        for source in visibleInputs { pinY[source.id] = pinFrames[source.pinKey]?.y }
+        let arr = Self.reordered(inputs.map(\.id), moving: draggedID,
+                                 visible: visibleIDs, pinY: pinY, pointerY: y)
+        guard arr != inputs.map(\.id) else { return }
+        var byID: [UUID: InputSource] = [:]
+        for source in inputs { byID[source.id] = source }
+        inputs = arr.compactMap { byID[$0] }
+    }
+
+    /// The insertion rule behind `reorderInput`, kept free of SwiftUI so it can
+    /// be tested directly. Only visible cards have a pin frame, so the anchor is
+    /// the last *visible* card above the pointer and the dragged card lands just
+    /// after it. Counting hidden cards instead produced an index into the
+    /// visible column but an insertion into the full array, which made every
+    /// downward drag a no-op while "Hide inactive" was on.
+    nonisolated static func reordered(_ order: [UUID], moving dragged: UUID,
+                          visible: [UUID], pinY: [UUID: CGFloat], pointerY: CGFloat) -> [UUID] {
+        guard let from = order.firstIndex(of: dragged) else { return order }
+        var arr = order
+        arr.remove(at: from)
+        let above = visible.filter { $0 != dragged && (pinY[$0] ?? .greatestFiniteMagnitude) < pointerY }
+        let insert = above.last.flatMap { arr.firstIndex(of: $0).map { $0 + 1 } } ?? 0
+        arr.insert(dragged, at: min(insert, arr.count))
+        return arr
     }
 
     func reorderOutput(_ draggedID: UUID, toNearY y: CGFloat) {
@@ -906,7 +942,7 @@ final class MixerStore: ObservableObject {
     /// Bumped when the shape of `Persisted` changes incompatibly.
     private static let schemaVersion = 1
 
-    private struct Persisted: Codable {
+    nonisolated struct Persisted: Codable {
         var version: Int?
         var previousDefaultOutputUID: String?
         var inputs: [InputSource]
@@ -994,13 +1030,13 @@ final class MixerStore: ObservableObject {
     /// Swift re-seeds `String.hashValue` on every process launch, so deriving
     /// the default from it repainted every un-customized card and cable each
     /// time the app started. FNV-1a over the key's bytes is stable across runs.
-    private static func stableHash(_ key: String) -> UInt64 {
+    nonisolated static func stableHash(_ key: String) -> UInt64 {
         var h: UInt64 = 0xcbf2_9ce4_8422_2325
-        for byte in key.utf8 { h = (h ^ UInt64(byte)) &* 0x1000_0000_01b3 }
+        for byte in key.utf8 { h = (h ^ UInt64(byte)) &* 0x0000_0100_0000_01b3 }
         return h
     }
 
-    private static func defaultColor(for key: String) -> ChannelColor {
+    nonisolated static func defaultColor(for key: String) -> ChannelColor {
         ChannelColor.allCases[Int(stableHash(key) % UInt64(ChannelColor.allCases.count))]
     }
 }
