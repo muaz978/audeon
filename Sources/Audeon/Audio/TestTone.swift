@@ -6,6 +6,10 @@ import CoreAudio
 /// the routing graph. One click on an output card answers "can this device
 /// make sound at all?", which separates device problems from routing problems
 /// when verifying by ear.
+/// Main-actor isolated: `activeEngines` is mutated only from the routing
+/// canvas, and the source node's render block touches its own captured phase
+/// rather than any state of this type.
+@MainActor
 final class TestTonePlayer {
     static let shared = TestTonePlayer()
 
