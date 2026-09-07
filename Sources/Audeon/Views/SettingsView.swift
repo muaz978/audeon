@@ -255,6 +255,11 @@ private struct AudioTab: View {
 }
 
 /// Applies the chosen theme to the whole app.
+/// Main-actor isolated: it assigns `NSApp.appearance`, which is main-actor
+/// state, and both call sites are SwiftUI view-lifecycle callbacks (`onAppear`
+/// and `onChange`) that already run on the main actor. Saying so lets the
+/// compiler check it instead of assuming it.
+@MainActor
 enum Appearance {
     static func apply(_ value: String) {
         switch value {
