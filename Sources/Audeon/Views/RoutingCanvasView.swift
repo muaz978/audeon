@@ -3,7 +3,7 @@ import AppKit
 
 /// Reports each pin's center in the shared "canvas" coordinate space.
 struct PinFramesKey: PreferenceKey {
-    static var defaultValue: [String: CGPoint] = [:]
+    static let defaultValue: [String: CGPoint] = [:]
     static func reduce(value: inout [String: CGPoint], nextValue: () -> [String: CGPoint]) {
         value.merge(nextValue()) { _, new in new }
     }

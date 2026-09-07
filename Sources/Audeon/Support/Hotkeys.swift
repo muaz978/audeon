@@ -2,8 +2,22 @@ import Foundation
 import AppKit
 import Carbon.HIToolbox
 
+/// `kAXTrustedCheckOptionPrompt` is imported from ApplicationServices as a
+/// mutable global, so every reference to it reads as shared mutable state under
+/// strict concurrency checking. It is a constant in practice; read it once here
+/// into a `String`, which is `Sendable`.
+///
+/// One strict-concurrency warning remains on this line and cannot be removed
+/// without hardcoding the SDK's string value, which would be worse: the
+/// annotation gap is in the imported header, not here. Only the prompting path
+/// needs the key at all — the passive check passes nil options.
+private let axTrustedCheckOptionPrompt = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+
 /// A system-wide Option-Command-A shortcut that shows or hides Audeon.
 /// Uses the Carbon hot key API, which works without any special permission.
+/// Main-actor isolated: registration and teardown are driven from Settings and
+/// the app delegate, and the Carbon handler runs on the main event loop.
+@MainActor
 final class ShowHideHotkey {
     static let shared = ShowHideHotkey()
 
@@ -81,6 +95,10 @@ final class ShowHideHotkey {
 /// tap and applies them to the system default output through Audeon's own
 /// device volume control, which also serves devices that have no native
 /// hardware volume. Opt in, and requires Accessibility access.
+/// Main-actor isolated: the event tap's run-loop source is added to
+/// `CFRunLoopGetMain()`, so the tap callback runs on the main thread, and every
+/// other entry point is driven from Settings or the app delegate.
+@MainActor
 final class SuperVolumeKeys {
     static let shared = SuperVolumeKeys()
 
@@ -94,8 +112,9 @@ final class SuperVolumeKeys {
     /// Passive check: reports whether Accessibility access is granted without
     /// ever raising the system prompt.
     var isTrusted: Bool {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
-        return AXIsProcessTrustedWithOptions(options)
+        //  A nil options dictionary is defined as "check, do not prompt", so the
+        //  passive path needs no option key at all.
+        AXIsProcessTrustedWithOptions(nil)
     }
 
     /// Returns false when Accessibility access is missing.
@@ -115,7 +134,7 @@ final class SuperVolumeKeys {
     /// Raises the macOS Accessibility grant prompt. Returns true only when
     /// access is already granted, since the prompt is answered out of process.
     private func requestTrust() -> Bool {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        let options = [axTrustedCheckOptionPrompt: true] as CFDictionary
         return AXIsProcessTrustedWithOptions(options)
     }
 
