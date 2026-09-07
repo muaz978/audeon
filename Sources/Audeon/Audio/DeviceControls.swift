@@ -35,28 +35,47 @@ extension AudioDeviceManager {
     /// volume. Every device that is not the current system default keeps
     /// whatever mute/volume state it last had, which can easily be muted or at
     /// 0% without anything in Audeon having touched it.
+    /// Checked across the main element and channels 1/2, the same elements
+    /// volume already uses. Many devices expose no main-element mute and carry
+    /// per-channel mutes instead; reading only the main element reported those
+    /// devices as unmuted, so `wakeOutputIfSilent` never unmuted them and the
+    /// route stayed silent with nothing in the UI to explain it.
     func isOutputMuted(forUID uid: String) -> Bool? {
         guard let id = deviceID(forUID: uid) else { return nil }
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyMute,
-            mScope: kAudioObjectPropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain)
-        guard AudioObjectHasProperty(id, &addr) else { return nil }
-        var size = UInt32(MemoryLayout<UInt32>.size)
-        var v: UInt32 = 0
-        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &v) == noErr else { return nil }
-        return v != 0
+        var sawControl = false
+        var allMuted = true
+        for element in Self.muteElements {
+            var addr = Self.muteAddress(element)
+            guard AudioObjectHasProperty(id, &addr) else { continue }
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            var v: UInt32 = 0
+            guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &v) == noErr else { continue }
+            sawControl = true
+            if v == 0 { allMuted = false }
+        }
+        return sawControl ? allMuted : nil
     }
 
+    /// Written to every mute element the device exposes, so a device muted
+    /// per-channel is actually unmuted rather than left silent.
     func setOutputMuted(_ muted: Bool, forUID uid: String) {
         guard let id = deviceID(forUID: uid) else { return }
-        var addr = AudioObjectPropertyAddress(
+        for element in Self.muteElements {
+            var addr = Self.muteAddress(element)
+            guard AudioObjectHasProperty(id, &addr) else { continue }
+            var v: UInt32 = muted ? 1 : 0
+            AudioObjectSetPropertyData(id, &addr, 0, nil, UInt32(MemoryLayout<UInt32>.size), &v)
+        }
+    }
+
+    /// The main element plus the first two channels, matching `volumeAddress`.
+    private static let muteElements: [AudioObjectPropertyElement] = [kAudioObjectPropertyElementMain, 1, 2]
+
+    private static func muteAddress(_ element: AudioObjectPropertyElement) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyMute,
             mScope: kAudioObjectPropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain)
-        guard AudioObjectHasProperty(id, &addr) else { return }
-        var v: UInt32 = muted ? 1 : 0
-        AudioObjectSetPropertyData(id, &addr, 0, nil, UInt32(MemoryLayout<UInt32>.size), &v)
+            mElement: element)
     }
 
     /// True when this output device is effectively silent at the hardware

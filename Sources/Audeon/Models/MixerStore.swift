@@ -85,7 +85,44 @@ final class MixerStore: ObservableObject {
             .store(in: &cancellables)
         deviceManager.$inputs.dropFirst().sink { [weak self] _ in self?.applyGraph() }
             .store(in: &cancellables)
+        // A sink that enumerates after launch (USB interface, driver just
+        // installed) still gets adopted; the guard inside makes this a no-op
+        // once the bridge is known to be on.
+        deviceManager.$outputs.dropFirst().sink { [weak self] _ in
+            self?.adoptSystemAudioStateOnLaunch()
+        }.store(in: &cancellables)
     }
+
+    /// Remove private aggregate devices left behind by an unexpected quit.
+    ///
+    /// Live engines are stopped first and the graph rebuilt afterwards. The
+    /// cleanup helpers destroy every Audeon-prefixed aggregate they find,
+    /// including the ones currently carrying audio, so calling them underneath
+    /// running routes cut those routes dead and stranded their I/O procs --
+    /// and the button's own description invites the user to press it while
+    /// routes are live.
+    func cleanUpLeftoverDevices() {
+        router.stopAll()
+        appRedirectEngine.stopAll()
+        AppRedirectEngine.cleanupLeakedAggregates()
+        AudioRouter.cleanupLeakedAggregates()
+        deviceManager.refresh()
+        applyGraph()
+    }
+
+    /// `isEffectivelySilent` performs synchronous CoreAudio property reads, and
+    /// the routing canvas asks for it from inside a SwiftUI body that
+    /// re-evaluates on every meter tick — thirty HAL round-trips a second, per
+    /// output card, on the main thread. Memoized briefly: still responsive,
+    /// roughly an order of magnitude fewer reads.
+    func isHardwareSilent(uid: String) -> Bool {
+        if let hit = silenceCache[uid], Date().timeIntervalSince(hit.at) < 0.25 { return hit.value }
+        let value = deviceManager.isEffectivelySilent(forUID: uid)
+        silenceCache[uid] = (value, Date())
+        return value
+    }
+
+    private var silenceCache: [String: (value: Bool, at: Date)] = [:]
 
     /// Full restart of the audio engines, used after sleep/wake.
     func reapply() {
@@ -141,8 +178,14 @@ final class MixerStore: ObservableObject {
     /// True while whole-system audio is being captured through the virtual sink.
     @Published private(set) var systemAudioActive = false
     /// The real output that was the system default before we redirected it, so
-    /// turning the bridge off restores exactly what the user had.
+    /// turning the bridge off restores exactly what the user had. Persisted:
+    /// an abnormal quit used to lose it, leaving the restore paths guessing.
     private var previousDefaultOutputUID: String?
+
+    /// Surfaced when the bridge could not be turned off, or the saved graph
+    /// could not be read. Nil when there is nothing to report.
+    @Published var systemAudioError: String?
+    @Published var loadError: String?
 
     /// Whether a capture sink (Audeon virtual device or BlackHole) is available.
     var systemAudioSinkAvailable: Bool { deviceManager.systemAudioSinkUID != nil }
@@ -155,10 +198,15 @@ final class MixerStore: ObservableObject {
         guard let sink = deviceManager.systemAudioSinkUID else { return }
         // Remember the real output we are replacing (never remember the sink
         // itself, or turning the bridge off would restore silence).
-        if let current = systemAudio.defaultOutputUID, current != sink {
+        if let current = systemAudio.defaultOutputUID, !deviceManager.isVirtualSystemAudio(current) {
             previousDefaultOutputUID = current
+            schedulePersist()
         }
-        systemAudio.setDefaultOutput(sink)
+        guard systemAudio.setDefaultOutput(sink) else {
+            systemAudioError = "Could not make \(deviceManager.endpoint(forUID: sink)?.name ?? "the capture device") the system output."
+            return
+        }
+        systemAudioError = nil
         if !inputs.contains(where: { $0.kind == .device(sink) }) {
             inputs.append(InputSource(kind: .device(sink), displayName: label))
         }
@@ -185,12 +233,45 @@ final class MixerStore: ObservableObject {
     /// and the System Audio card exists, a previous session left the bridge on
     /// (or quit unexpectedly). Reflect that in the UI state so the menu offers
     /// "Stop capturing" instead of pretending the bridge is off.
+    /// Safe to call repeatedly: it adopts at most once, and only once the
+    /// device list actually contains the sink. `AudioDeviceManager.refresh()`
+    /// now publishes inline on the main thread, so the call from `init()`
+    /// sees a populated map instead of the empty one that made this
+    /// unreachable; the re-attempt on later device lists covers a sink that
+    /// enumerates after launch.
     func adoptSystemAudioStateOnLaunch() {
-        guard let sink = deviceManager.systemAudioSinkUID,
+        guard !systemAudioActive,
+              let sink = deviceManager.systemAudioSinkUID,
               systemAudio.defaultOutputUID == sink,
               inputs.contains(where: { $0.kind == .device(sink) }) else { return }
         sinkGuard.activate(uid: sink)
         systemAudioActive = true
+    }
+
+    /// Every uid that could plausibly take over as the system default, best
+    /// first. Each is checked against the live device map, so the list never
+    /// contains the capture sink, a synthetic Output Group uid, or a device
+    /// that has been unplugged since we remembered it -- all three make
+    /// `setDefaultOutput` a silent no-op that strands the Mac on the sink.
+    private func restoreCandidates() -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        func add(_ uid: String?) {
+            guard let uid, deviceManager.isUsableOutput(uid), seen.insert(uid).inserted else { return }
+            result.append(uid)
+        }
+        add(previousDefaultOutputUID)
+        for output in outputs where output.groupMembers == nil { add(output.uid) }
+        for output in outputs { for member in output.groupMembers ?? [] { add(member) } }
+        for device in deviceManager.outputs { add(device.uid) }
+        return result
+    }
+
+    /// Try each candidate until CoreAudio actually accepts one.
+    @discardableResult
+    private func restoreSystemOutput() -> Bool {
+        for uid in restoreCandidates() where systemAudio.setDefaultOutput(uid) { return true }
+        return false
     }
 
     /// Called when the app is quitting. With Audeon gone nothing drains the
@@ -199,23 +280,27 @@ final class MixerStore: ObservableObject {
     /// connections so the setup is one click away next launch.
     func restoreSystemOutputForQuit() {
         guard systemAudioActive else { return }
-        let restore = previousDefaultOutputUID
-            ?? outputs.first(where: { !deviceManager.isVirtualSystemAudio($0.uid) })?.uid
-            ?? deviceManager.outputs.first(where: { !deviceManager.isVirtualSystemAudio($0.uid) })?.uid
-        if let restore { systemAudio.setDefaultOutput(restore) }
+        if !restoreSystemOutput() {
+            NSLog("Audeon: no usable output to restore on quit; system default left unchanged")
+        }
     }
 
     /// Stop capturing system audio: restore the previous default output and
     /// remove the System Audio card.
     func disableSystemAudioCapture() {
         sinkGuard.deactivate()
-        let restore = previousDefaultOutputUID
-            ?? deviceManager.outputs.first(where: { !deviceManager.isVirtualSystemAudio($0.uid) })?.uid
-        if let restore { systemAudio.setDefaultOutput(restore) }
-        if let sink = deviceManager.systemAudioSinkUID {
-            if let source = inputs.first(where: { $0.kind == .device(sink) }) {
-                removeInput(source.id)
-            }
+        guard restoreSystemOutput() else {
+            // Tearing the card down here would leave the Mac outputting to the
+            // sink while the UI insists nothing is capturing, with no way back
+            // inside the app. Keep the bridge marked active and say so.
+            if let sink = deviceManager.systemAudioSinkUID { sinkGuard.activate(uid: sink) }
+            systemAudioError = "Could not switch the system output back to a real device. Pick one in System Settings > Sound, then try again."
+            return
+        }
+        systemAudioError = nil
+        if let sink = deviceManager.systemAudioSinkUID,
+           let source = inputs.first(where: { $0.kind == .device(sink) }) {
+            removeInput(source.id)
         }
         systemAudioActive = false
     }
@@ -346,8 +431,15 @@ final class MixerStore: ObservableObject {
     }
 
     /// Redirect helpers used by the menu bar (route to a hardware device).
+    /// Expanded to real devices: an Output Group is one card but several
+    /// destinations, and collapsing it to its own synthetic uid made the menu
+    /// bar report "1 device" for a source playing to four.
     func connectedDeviceUIDs(for sourceID: UUID) -> Set<String> {
-        Set(connectedOutputs(for: sourceID).map { $0.uid })
+        var uids = Set<String>()
+        for output in connectedOutputs(for: sourceID) {
+            if let members = output.groupMembers { uids.formUnion(members) } else { uids.insert(output.uid) }
+        }
+        return uids
     }
 
     func toggleRouteToDevice(sourceID: UUID, deviceUID: String) {
@@ -390,7 +482,15 @@ final class MixerStore: ObservableObject {
         }
         switch source.kind {
         case .device:
-            let ids = connections.filter { $0.sourceID == source.id }.map { $0.id }
+            // A connection to an Output Group is carried by one derived route
+            // per member, not by the connection id itself. Looking only at
+            // conn.id found no level and every group-routed source metered as
+            // permanently silent while it was actually playing.
+            let ids = connections.filter { $0.sourceID == source.id }.flatMap { conn -> [UUID] in
+                guard let output = outputs.first(where: { $0.id == conn.outputID }),
+                      let members = output.groupMembers else { return [conn.id] }
+                return members.indices.map { Self.derivedRouteID(from: conn.id, index: $0) }
+            }
             return AudioMeter.combine(ids.compactMap { router.levels[$0] })
         case .app(let bundleID):
             let outs = connectedOutputs(for: source.id).map { $0.uid }
@@ -449,12 +549,20 @@ final class MixerStore: ObservableObject {
     /// other cards whose pin sits above the pointer, which is stable as the
     /// pointer moves (no oscillation or flicker between adjacent slots).
     func reorderInput(_ draggedID: UUID, toNearY y: CGFloat) {
-        let others = inputs.filter { $0.id != draggedID }
-        let targetIndex = others.filter { (pinFrames[$0.pinKey]?.y ?? .greatestFiniteMagnitude) < y }.count
+        // Only cards actually on screen have a pin frame. Counting the hidden
+        // ones gave a target index into the visible column but an insertion
+        // index into the full array, so with "Hide inactive" on every downward
+        // drag resolved to the same slot and appeared to do nothing. Anchor to
+        // the last visible card above the pointer instead.
+        let visible = visibleInputs.filter { $0.id != draggedID }
+        let above = visible.filter { (pinFrames[$0.pinKey]?.y ?? .greatestFiniteMagnitude) < y }
         guard let from = inputs.firstIndex(where: { $0.id == draggedID }) else { return }
         var arr = inputs
         let item = arr.remove(at: from)
-        arr.insert(item, at: min(targetIndex, arr.count))
+        let insert = above.last.flatMap { anchor in
+            arr.firstIndex(where: { $0.id == anchor.id }).map { $0 + 1 }
+        } ?? 0
+        arr.insert(item, at: min(insert, arr.count))
         if arr != inputs { inputs = arr }
     }
 
@@ -571,8 +679,14 @@ final class MixerStore: ObservableObject {
         var taps: [AppTapRequest] = []
         let appByBundle = Dictionary(uniqueKeysWithValues: appManager.apps.map { ($0.bundleID, $0) })
 
+        // A device reachable both as its own output card and as a member of a
+        // connected group would otherwise get two independent engines feeding
+        // it the same source, doubling the signal into that device.
+        var claimed = Set<String>()
+
         func addTarget(_ source: InputSource, outputUID: String, outputVolume: Float, routeID: UUID) {
             let gain = source.effectiveGain * outputVolume
+            guard claimed.insert("\(source.id)|\(outputUID)").inserted else { return }
             switch source.kind {
             case .device(let uid):
                 routes.append(Route(id: routeID, inputUID: "input:\(uid)", outputUID: "output:\(outputUID)",
@@ -645,6 +759,7 @@ final class MixerStore: ObservableObject {
             formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
             let filename = "\(title(for: source)) \(formatter.string(from: Date())).caf"
             let recorder = MixRecorder(url: Self.recordingsFolder.appendingPathComponent(filename))
+            recorder.start()
             recorders[sourceID] = recorder
             recordingSourceIDs.insert(sourceID)
             attachRecorders()
@@ -667,6 +782,18 @@ final class MixerStore: ObservableObject {
     /// source. Runs after every reconciliation, because engines are rebuilt
     /// there; the recorder object survives and keeps appending to one file.
     private func attachRecorders() {
+        // A source removed, or replaced by loading a scene, while it was
+        // recording used to leave its recorder mounted on an engine that no
+        // longer exists: the file stopped growing with no indication, the id
+        // stuck in recordingSourceIDs forever, and the user could start a
+        // second recording they had no way to stop.
+        let live = Set(inputs.map(\.id))
+        for (id, recorder) in recorders where !live.contains(id) {
+            recorder.finish()
+            recorders[id] = nil
+            recordingSourceIDs.remove(id)
+        }
+
         for source in inputs {
             let recorder = recorders[source.id]   // nil detaches
             switch source.kind {
@@ -675,8 +802,15 @@ final class MixerStore: ObservableObject {
                 if source.followsSystemOutput {
                     routeID = source.id
                 } else if let conn = connections.first(where: { $0.sourceID == source.id }) {
-                    if let out = outputs.first(where: { $0.id == conn.outputID }), out.isGroup {
-                        routeID = Self.derivedRouteID(from: conn.id, index: 0)
+                    if let out = outputs.first(where: { $0.id == conn.outputID }),
+                       let members = out.groupMembers {
+                        // Mount on the first member that actually has a live
+                        // engine. Always taking member 0 silently dropped the
+                        // whole recording whenever that member was unplugged,
+                        // even though the group was still playing elsewhere.
+                        routeID = members.indices
+                            .map { Self.derivedRouteID(from: conn.id, index: $0) }
+                            .first { router.hasEngine(routeID: $0) }
                     } else {
                         routeID = conn.id
                     }
@@ -690,7 +824,7 @@ final class MixerStore: ObservableObject {
                     outputUID = systemAudio.defaultOutputUID
                 } else if let conn = connections.first(where: { $0.sourceID == source.id }),
                           let out = outputs.first(where: { $0.id == conn.outputID }) {
-                    outputUID = out.isGroup ? out.groupMembers?.first : out.uid
+                    outputUID = out.groupMembers?.first ?? out.uid
                 } else {
                     outputUID = nil
                 }
@@ -735,10 +869,14 @@ final class MixerStore: ObservableObject {
     /// loaded lazily by AppKit and never invalidates SwiftUI on its own, which
     /// left freshly added cards iconless until a click forced a re-render.
     @Published private var appIcons: [String: NSImage] = [:]
+    /// Bundle ids with no resolvable icon. Without this the lookup was
+    /// re-dispatched from every SwiftUI body evaluation, forever.
+    private var iconLookupFailed: Set<String> = []
 
     func icon(for source: InputSource) -> NSImage? {
         guard case .app(let bundleID) = source.kind else { return nil }
         if let cached = appIcons[bundleID] { return cached }
+        guard !iconLookupFailed.contains(bundleID) else { return nil }
         resolveIcon(bundleID)
         return nil
     }
@@ -747,20 +885,30 @@ final class MixerStore: ObservableObject {
     /// state while SwiftUI evaluates a body is not allowed), then cache it.
     private func resolveIcon(_ bundleID: String) {
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.appIcons[bundleID] == nil else { return }
+            guard let self, self.appIcons[bundleID] == nil,
+                  !self.iconLookupFailed.contains(bundleID) else { return }
             // The installed bundle lookup is deterministic and works for
             // closed apps too; the running-app icon is only a fallback.
             if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
                 self.appIcons[bundleID] = NSWorkspace.shared.icon(forFile: url.path)
             } else if let img = self.appManager.apps.first(where: { $0.bundleID == bundleID })?.icon {
                 self.appIcons[bundleID] = img
+            } else {
+                // Nothing to find. Remember that, or every future body
+                // evaluation queues the same failing lookup again.
+                self.iconLookupFailed.insert(bundleID)
             }
         }
     }
 
     // MARK: - Persistence
 
+    /// Bumped when the shape of `Persisted` changes incompatibly.
+    private static let schemaVersion = 1
+
     private struct Persisted: Codable {
+        var version: Int?
+        var previousDefaultOutputUID: String?
         var inputs: [InputSource]
         var outputs: [OutputTarget]
         var connections: [Connection]
@@ -777,8 +925,19 @@ final class MixerStore: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
     }
 
+    /// Write any debounced changes out now. The 0.4 s persist debounce was
+    /// simply dropped when the app terminated, so a burst of graph edits made
+    /// just before Cmd-Q was lost entirely.
+    func flushPendingWrites() {
+        persistWork?.cancel()
+        persistWork = nil
+        persist()
+    }
+
     private func persist() {
         let payload = Persisted(
+            version: Self.schemaVersion,
+            previousDefaultOutputUID: previousDefaultOutputUID,
             inputs: inputs, outputs: outputs, connections: connections,
             colors: colors.mapValues { $0.rawValue },
             deviceNicknames: deviceNicknames,
@@ -796,8 +955,27 @@ final class MixerStore: ObservableObject {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: saveURL),
-              let payload = try? JSONDecoder().decode(Persisted.self, from: data) else { return }
+        // No file at all is simply a first run.
+        guard let data = try? Data(contentsOf: saveURL) else { return }
+        let payload: Persisted
+        do {
+            payload = try JSONDecoder().decode(Persisted.self, from: data)
+        } catch {
+            // Starting from an empty graph and letting the next edit overwrite
+            // the file destroyed the user's setup silently. Set the unreadable
+            // copy aside instead, and say so.
+            let backup = saveURL.deletingPathExtension().appendingPathExtension("corrupt.json")
+            try? FileManager.default.removeItem(at: backup)
+            try? FileManager.default.moveItem(at: saveURL, to: backup)
+            NSLog("Audeon: could not read graph.json (%@); kept it as %@",
+                  error.localizedDescription, backup.lastPathComponent)
+            loadError = "Your saved setup could not be read. The old file was kept as \(backup.lastPathComponent) and Audeon started with an empty graph."
+            return
+        }
+        if let version = payload.version, version > Self.schemaVersion {
+            loadError = "This setup was saved by a newer version of Audeon. Some settings may be missing."
+        }
+        previousDefaultOutputUID = payload.previousDefaultOutputUID
         inputs = payload.inputs
         outputs = payload.outputs
         connections = payload.connections
@@ -813,7 +991,16 @@ final class MixerStore: ObservableObject {
         return base.appendingPathComponent("Audeon/graph.json")
     }
 
+    /// Swift re-seeds `String.hashValue` on every process launch, so deriving
+    /// the default from it repainted every un-customized card and cable each
+    /// time the app started. FNV-1a over the key's bytes is stable across runs.
+    private static func stableHash(_ key: String) -> UInt64 {
+        var h: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in key.utf8 { h = (h ^ UInt64(byte)) &* 0x1000_0000_01b3 }
+        return h
+    }
+
     private static func defaultColor(for key: String) -> ChannelColor {
-        ChannelColor.allCases[abs(key.hashValue) % ChannelColor.allCases.count]
+        ChannelColor.allCases[Int(stableHash(key) % UInt64(ChannelColor.allCases.count))]
     }
 }

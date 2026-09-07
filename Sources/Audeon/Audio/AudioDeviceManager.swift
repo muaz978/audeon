@@ -1,6 +1,7 @@
 import Foundation
 import CoreAudio
 import Combine
+import os
 
 /// Direction of an audio endpoint.
 enum EndpointKind: String, Codable {
@@ -42,37 +43,68 @@ final class AudioDeviceManager: ObservableObject {
     @Published private(set) var outputs: [AudioEndpoint] = []
 
     // Cache: uid -> current AudioDeviceID, resolved fresh on every refresh.
+    //
+    // Guarded by `mapLock`, not confined to the main thread: the routing
+    // engines resolve uids from their own work queues so the HAL calls that
+    // follow stay off the main thread. Writes still only happen on the main
+    // thread, and the critical sections are single dictionary operations.
     private var deviceIDByUID: [String: AudioDeviceID] = [:]
+    private let mapLock = UnsafeMutablePointer<os_unfair_lock>.allocate(capacity: 1)
 
     private var listenerBlock: AudioObjectPropertyListenerBlock?
 
     init() {
+        mapLock.initialize(to: os_unfair_lock())
         refresh()
         installDeviceListChangeListener()
     }
 
     deinit {
         removeDeviceListChangeListener()
+        mapLock.deinitialize(count: 1)
+        mapLock.deallocate()
     }
 
     /// Resolve a stable UID to the live AudioDeviceID for engine wiring.
+    /// Safe to call from any thread.
     func deviceID(forUID uid: String) -> AudioDeviceID? {
-        deviceIDByUID[uid]
+        os_unfair_lock_lock(mapLock); defer { os_unfair_lock_unlock(mapLock) }
+        return deviceIDByUID[uid]
     }
 
     func endpoint(forUID uid: String) -> AudioEndpoint? {
         inputs.first { $0.uid == uid } ?? outputs.first { $0.uid == uid }
     }
 
-    /// True when the given uid is the Audeon virtual device, so the UI can keep
-    /// it out of the raw device pickers (it is used only via System Audio).
-    func isVirtualSystemAudio(_ uid: String) -> Bool { uid == audeonVirtualDeviceUID }
+    /// True when the given uid is a whole-system capture sink, so the UI can
+    /// keep it out of the raw device pickers (it is used only via System Audio)
+    /// and the restore paths never hand the system default back to it.
+    ///
+    /// This must recognize every uid `systemAudioSinkUID` can return, not just
+    /// the Audeon device: when the driver is not installed the app selects a
+    /// BlackHole output as the sink itself, and restoring the system default to
+    /// the sink is exactly the silence those paths exist to prevent.
+    func isVirtualSystemAudio(_ uid: String) -> Bool {
+        if uid == audeonVirtualDeviceUID { return true }
+        if uid.localizedCaseInsensitiveContains("blackhole") { return true }
+        if let endpoint = outputs.first(where: { $0.uid == uid }) {
+            return endpoint.name.localizedCaseInsensitiveContains("blackhole")
+        }
+        return false
+    }
+
+    /// True when the uid resolves to a live device that can actually be made
+    /// the system default. Restore paths must check this: a uid for an
+    /// unplugged device, or a synthetic Output Group uid, silently no-ops.
+    func isUsableOutput(_ uid: String) -> Bool {
+        deviceID(forUID: uid) != nil && !isVirtualSystemAudio(uid)
+    }
 
     /// The best available whole-system capture sink: the Audeon virtual device
     /// if its driver is installed, otherwise BlackHole if present, else nil.
     /// Driver-agnostic so the System Audio feature works either way.
     var systemAudioSinkUID: String? {
-        if deviceIDByUID[audeonVirtualDeviceUID] != nil { return audeonVirtualDeviceUID }
+        if deviceID(forUID: audeonVirtualDeviceUID) != nil { return audeonVirtualDeviceUID }
         if let bh = outputs.first(where: { $0.name.localizedCaseInsensitiveContains("blackhole") }) {
             return bh.uid
         }
@@ -109,11 +141,26 @@ final class AudioDeviceManager: ObservableObject {
         let sortedIn = newInputs.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         let sortedOut = newOutputs.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 
-        DispatchQueue.main.async {
-            self.deviceIDByUID = newMap
-            self.inputs = sortedIn
-            self.outputs = sortedOut
+        let apply = { [self] in
+            // Publish only on change. Destroying an aggregate device fires a
+            // device-list notification, so republishing unconditionally let a
+            // route that could never start drive an endless
+            // rebuild -> notify -> reconcile -> rebuild loop on the main thread.
+            os_unfair_lock_lock(mapLock)
+            let mapChanged = deviceIDByUID != newMap
+            if mapChanged { deviceIDByUID = newMap }
+            os_unfair_lock_unlock(mapLock)
+            if mapChanged { objectWillChange.send() }
+            if inputs != sortedIn { inputs = sortedIn }
+            if outputs != sortedOut { outputs = sortedOut }
         }
+
+        // Callers on the main thread (init, reapply) read this state
+        // immediately after calling refresh(). Deferring the assignment to the
+        // next main-loop turn made those reads see an empty device map, which
+        // is what left adoptSystemAudioStateOnLaunch() permanently unable to
+        // succeed. Apply inline when we are already on the main thread.
+        if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
     }
 
     // MARK: - Change listener

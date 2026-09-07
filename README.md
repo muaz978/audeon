@@ -160,7 +160,11 @@ System Settings > Privacy & Security > Microphone.
 | File | Role |
 |------|------|
 | `Audio/AudioDeviceManager.swift` | CoreAudio device enumeration and a hot plug change listener |
-| `Audio/AudioRouter.swift` | One AVAudioEngine per device-to-device route, with gain |
+| `Audio/AudioRouter.swift` | Device-to-device routes: an AVAudioEngine for same-device, a direct I/O proc on a private aggregate for cross-device |
+| `Audio/AudioRecording.swift` | Recording, buffered through a ring so the audio thread never touches the file |
+| `Audio/CrossDeviceDSP.swift` | The manually rendered EQ/overdrive/Magic Boost chain used inside the cross-device I/O proc |
+| `Audio/SinkGuard.swift` | Pins the capture sink at unity gain while system audio capture is on |
+| `Audio/TestTone.swift` | Per-output test tone, for checking a device by ear in isolation |
 | `Audio/AppAudioManager.swift` | Auto-detects running apps via the Core Audio process object list |
 | `Audio/AppRedirectEngine.swift` | Per app and output process tap, private aggregate device, gain passthrough |
 | `Audio/SystemAudioController.swift` | Reads and sets the default Output, Input, and Sound Effects devices |
@@ -175,6 +179,7 @@ System Settings > Privacy & Security > Microphone.
 | `Views/ContentView.swift` | Window chrome, the menu button, and the Scenes menu |
 | `Views/SettingsView.swift` | Tabbed settings: general, devices, appearance, audio |
 | `Views/OnboardingView.swift` | First run welcome and permissions screen |
+| `Support/Hotkeys.swift` | The global show/hide shortcut and Super Volume Keys |
 | `AudeonApp.swift` | App entry point, menus, and the menu bar popover |
 | `Driver/` | The Audeon virtual audio driver (GPL-3.0, see its README) |
 
@@ -231,9 +236,41 @@ while the sink was the default output. Audeon now pins the sink at unity gain
 while capturing and guards it against outside changes, and every output card
 has a test tone button so a device can be checked by ear in isolation.
 
+A reliability pass has since gone through the whole codebase, fixing 80
+verified defects. The ones worth knowing about: stopping a recording could
+truncate it to a fraction of a second (the file is now opened once and written
+from a dedicated thread, never from the audio callback); a bridge left on by an
+abnormal quit was never re-adopted on the next launch, so the following quit
+could leave the Mac with its output pointed at a sink nothing drains; engines
+stopped by a sample-rate change were kept forever instead of rebuilt, which
+silenced a redirected app everywhere rather than just in Audeon; the Settings
+sheet had no way to close it; the maintenance button destroyed the aggregate
+devices of every live route; and the driver had an out-of-bounds read on every
+device creation plus a use-after-free in its realtime path, both reproduced
+under sanitizers before being fixed. Route and tap startup also moved off the
+main thread, so building a route no longer freezes the UI. CI now analyzes the
+C driver and the shell scripts, which it never did before.
+
 Still planned:
 
-1. Sign and notarize the app and driver for one-click installs.
+1. Verify the reliability pass on real hardware. The recorder rewrite and the
+   newly asynchronous route startup are verified by sanitizers, static analysis
+   and the driver test suite, but not yet by listening.
+2. Sign and notarize the app and driver for one-click installs.
+3. A Swift test target. There is none today, so nothing catches a regression in
+   the pure-logic paths: persistence and schema migration, choosing a device to
+   restore the system output to, Output Group expansion, and the recording ring
+   buffer's wrap and rollover behaviour.
+4. Swift 6 language mode. The package still builds in Swift 5 mode, so strict
+   concurrency checking is off and the compiler catches none of the data races
+   the reliability pass had to find by inspection.
+5. Two known driver races, both torn values affecting timing and mute rather
+   than memory safety: the zero-timestamp state is written under one mutex and
+   read under another, and two function-level statics in `DoIOOperation` are
+   shared between both devices' IO threads.
+6. Update a live process tap's process list in place. Today a genuine change to
+   an app's audio processes rebuilds the tap, which briefly drops that app's
+   audio.
 
 ## License
 

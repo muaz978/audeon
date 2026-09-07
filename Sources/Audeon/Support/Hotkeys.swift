@@ -10,29 +10,57 @@ final class ShowHideHotkey {
     private var hotKeyRef: EventHotKeyRef?
     private var handlerRef: EventHandlerRef?
 
-    func setEnabled(_ on: Bool) {
+    /// The Carbon status of the last failed registration, or `noErr` while the
+    /// shortcut is live. Option-Command-A can already belong to the system or
+    /// to another app; registration then fails and the shortcut would never
+    /// fire, so the failure is recorded here instead of vanishing.
+    private(set) var lastError: OSStatus = noErr
+
+    /// True while the shortcut is registered and will fire.
+    var isRegistered: Bool { hotKeyRef != nil }
+
+    /// Returns false when the shortcut could not be registered; `lastError`
+    /// then carries the Carbon status.
+    @discardableResult
+    func setEnabled(_ on: Bool) -> Bool {
         on ? register() : unregister()
     }
 
-    private func register() {
-        guard hotKeyRef == nil else { return }
+    private func register() -> Bool {
+        guard hotKeyRef == nil else { return true }
 
         if handlerRef == nil {
             var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                           eventKind: UInt32(kEventHotKeyPressed))
-            InstallEventHandler(GetEventDispatcherTarget(), { _, _, _ in
+            let status = InstallEventHandler(GetEventDispatcherTarget(), { _, _, _ in
                 DispatchQueue.main.async { ShowHideHotkey.shared.toggle() }
                 return noErr
             }, 1, &eventType, nil, &handlerRef)
+            guard status == noErr else {
+                handlerRef = nil
+                lastError = status
+                NSLog("Audeon.hotkey: could not install the hot key handler (OSStatus \(status))")
+                return false
+            }
         }
 
         let hotKeyID = EventHotKeyID(signature: OSType(0x4155444E) /* AUDN */, id: 1)
-        RegisterEventHotKey(UInt32(kVK_ANSI_A), UInt32(optionKey | cmdKey),
-                            hotKeyID, GetEventDispatcherTarget(), 0, &hotKeyRef)
+        let status = RegisterEventHotKey(UInt32(kVK_ANSI_A), UInt32(optionKey | cmdKey),
+                                         hotKeyID, GetEventDispatcherTarget(), 0, &hotKeyRef)
+        guard status == noErr, hotKeyRef != nil else {
+            hotKeyRef = nil
+            lastError = status
+            NSLog("Audeon.hotkey: Option-Command-A is unavailable, another app may already own it (OSStatus \(status))")
+            return false
+        }
+        lastError = noErr
+        return true
     }
 
-    private func unregister() {
+    private func unregister() -> Bool {
         if let hotKeyRef { UnregisterEventHotKey(hotKeyRef); self.hotKeyRef = nil }
+        lastError = noErr
+        return true
     }
 
     private func toggle() {
@@ -63,16 +91,32 @@ final class SuperVolumeKeys {
     /// NX media key codes carried in NSEvent subtype 8 system-defined events.
     private static let soundUp = 0, soundDown = 1, mute = 7
 
-    var isTrusted: Bool { AXIsProcessTrusted() }
+    /// Passive check: reports whether Accessibility access is granted without
+    /// ever raising the system prompt.
+    var isTrusted: Bool {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
+        return AXIsProcessTrustedWithOptions(options)
+    }
 
-    /// Returns false when Accessibility access is missing (macOS shows the
-    /// grant prompt; the user re-enables the toggle after granting).
+    /// Returns false when Accessibility access is missing.
+    ///
+    /// Pass `prompt: true` only when the user has actively asked to turn the
+    /// feature on: that raises the macOS grant prompt, and the user re-enables
+    /// the toggle after granting. Restoring the saved setting at launch leaves
+    /// `prompt` off, so access revoked since the last run is skipped silently
+    /// rather than nagging on every launch.
     @discardableResult
-    func setEnabled(_ on: Bool) -> Bool {
+    func setEnabled(_ on: Bool, prompt: Bool = false) -> Bool {
         if !on { stop(); return true }
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        guard AXIsProcessTrustedWithOptions(options) else { return false }
+        guard isTrusted || (prompt && requestTrust()) else { return false }
         return start()
+    }
+
+    /// Raises the macOS Accessibility grant prompt. Returns true only when
+    /// access is already granted, since the prompt is answered out of process.
+    private func requestTrust() -> Bool {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        return AXIsProcessTrustedWithOptions(options)
     }
 
     private func start() -> Bool {
@@ -84,28 +128,61 @@ final class SuperVolumeKeys {
             place: .headInsertEventTap,
             options: .defaultTap,
             eventsOfInterest: mask,
-            callback: { _, _, cgEvent, _ in
-                if SuperVolumeKeys.shared.handle(cgEvent) { return nil }  // swallow
+            callback: { _, type, cgEvent, refcon in
+                // A C function pointer captures nothing, so the instance rides
+                // along in the refcon handed to tapCreate below.
+                guard let refcon else { return Unmanaged.passUnretained(cgEvent) }
+                let keys = Unmanaged<SuperVolumeKeys>.fromOpaque(refcon).takeUnretainedValue()
+                // macOS switches a tap off when a callback runs long, and on
+                // user input; this callback is the only notice of it. Switch
+                // the tap back on and pass the event through unmodified.
+                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    keys.reenable()
+                    return Unmanaged.passUnretained(cgEvent)
+                }
+                if keys.handle(cgEvent) { return nil }  // swallow
                 return Unmanaged.passUnretained(cgEvent)
             },
-            userInfo: nil
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
             NSLog("Audeon.keys: could not create the volume keys event tap")
             return false
         }
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
+            CFMachPortInvalidate(tap)
+            NSLog("Audeon.keys: could not create the volume keys run loop source")
+            return false
+        }
         self.tap = tap
-        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        runLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
         NSLog("Audeon.keys: Super Volume Keys active")
         return true
     }
 
+    /// Called from the tap callback after macOS disabled the tap.
+    private func reenable() {
+        guard let tap else { return }
+        CGEvent.tapEnable(tap: tap, enable: true)
+        NSLog("Audeon.keys: the system disabled the volume keys tap; re-enabled it")
+    }
+
+    /// Tears the tap down completely: the run loop source is removed and
+    /// invalidated and the Mach port is invalidated, so toggling the feature
+    /// off and on repeatedly neither leaks nor crashes. Safe to call when
+    /// nothing is running.
     private func stop() {
-        if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
-        if let runLoopSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes) }
-        tap = nil
+        if let runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+            CFRunLoopSourceInvalidate(runLoopSource)
+        }
+        if let tap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
+        }
         runLoopSource = nil
+        tap = nil
     }
 
     /// Returns true when the event was a volume key press we consumed.

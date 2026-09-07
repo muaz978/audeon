@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import CoreAudio
 import Combine
+import os
 
 /// UID prefix for the private aggregate devices Audeon creates per app capture.
 /// Used both to recognize and to hide them from the device lists.
@@ -34,16 +35,49 @@ final class AppRedirectEngine: ObservableObject {
     private var units: [String: TapUnit] = [:]   // key: "bundleID|outputUID"
     private let lock = NSLock()
 
+    /// Keys whose tap could not be created, with the process set that failed
+    /// and when it may be retried. Without this, a tap that can never be
+    /// created was retried on every single graph mutation, and each attempt
+    /// rewrote the target device's hardware mute and volume.
+    private var failures: [String: (processes: Set<AudioObjectID>, retryAfter: Date, attempts: Int)] = [:]
+
+    /// Serialises tap construction and teardown, keeping those HAL calls off
+    /// the main thread.
+    private let work = DispatchQueue(label: "com.audeon.redirect.apply", qos: .userInitiated)
+
+    /// Meter readings staged by the tap callbacks and drained on the main
+    /// thread at a fixed rate, rather than one dispatch block per firing.
+    private var pendingLevels: [String: MeterReading] = [:]
+    private var liveKeys: Set<String> = []
+    private let meterLock = UnsafeMutablePointer<os_unfair_lock>.allocate(capacity: 1)
+    private var meterPump: DispatchSourceTimer?
+
     init(deviceManager: AudioDeviceManager) {
         self.deviceManager = deviceManager
+        meterLock.initialize(to: os_unfair_lock())
         Self.cleanupLeakedAggregates()
+    }
+
+    deinit {
+        meterPump?.cancel()
+        meterLock.deinitialize(count: 1)
+        meterLock.deallocate()
     }
 
     private func key(_ bundleID: String, _ outputUID: String) -> String { "\(bundleID)|\(outputUID)" }
 
+    /// Reconcile the live capture units against the wanted taps.
+    ///
+    /// Returns immediately. Creating a process tap and its private aggregate,
+    /// and destroying them again, are blocking HAL calls that used to run on
+    /// the main thread — so every change to a redirected app froze the UI. The
+    /// work now runs on a serial queue, and the units lock is held only across
+    /// dictionary operations, never across a HAL call.
     func apply(_ requests: [AppTapRequest]) {
-        lock.lock(); defer { lock.unlock() }
+        work.async { [weak self] in self?.applyOnWorker(requests) }
+    }
 
+    private func applyOnWorker(_ requests: [AppTapRequest]) {
         // A new reconciliation supersedes any previous failure. Without this,
         // one stale error banner stayed on screen forever.
         DispatchQueue.main.async { if self.lastError != nil { self.lastError = nil } }
@@ -53,35 +87,123 @@ final class AppRedirectEngine: ObservableObject {
             wanted[key(r.bundleID, r.outputUID)] = r
         }
 
+        // Take the doomed units out under the lock, stop them outside it.
+        // Process sets are compared as sets: re-enumerating a multi-process app
+        // (Chrome, Edge) returns the same processes in a different order, and
+        // treating that as a change tore the tap down and rebuilt it, dropping
+        // audio and briefly unmuting the app's own output.
+        var doomed: [(String, TapUnit)] = []
+        var survivors: [String: TapUnit] = [:]
+        lock.lock()
         for (k, unit) in units {
-            if let w = wanted[k], w.processObjects == unit.processes {
-                unit.configure(volume: w.volume, boost: w.boost, eqEnabled: w.eqEnabled, eq: w.eq, magicBoost: w.magicBoost)
+            if let w = wanted[k], unit.isHealthy, Set(w.processObjects) == Set(unit.processes) {
+                survivors[k] = unit
             } else {
-                unit.stop(); units[k] = nil
-                DispatchQueue.main.async { self.levels[k] = nil }
+                doomed.append((k, unit))
+                units[k] = nil
             }
         }
+        lock.unlock()
 
-        for (k, w) in wanted where units[k] == nil {
+        for (k, unit) in doomed {
+            unit.stop()
+            DispatchQueue.main.async { self.levels[k] = nil }
+        }
+        for (k, unit) in survivors {
+            guard let w = wanted[k] else { continue }
+            unit.configure(volume: w.volume, boost: w.boost, eqEnabled: w.eqEnabled,
+                           eq: w.eq, magicBoost: w.magicBoost)
+        }
+
+        let now = Date()
+        for (k, w) in wanted where survivors[k] == nil {
+            // Back off from a tap that keeps failing. A changed process set
+            // means it is worth trying again straight away.
+            if let failure = failures[k] {
+                if failure.processes != Set(w.processObjects) {
+                    failures[k] = nil
+                } else if now < failure.retryAfter {
+                    continue
+                }
+            }
+
             // Same hardware-level wake as the device router: an output that
             // has never been selected in System Settings can sit muted or at
-            // 0% volume with nothing in Audeon having touched it.
-            deviceManager.wakeOutputIfSilent(forUID: w.outputUID)
+            // 0% volume with nothing in Audeon having touched it. Only on a
+            // first attempt -- repeating it on every retry is what let a
+            // failing tap keep overwriting the user's volume.
+            if failures[k] == nil { deviceManager.wakeOutputIfSilent(forUID: w.outputUID) }
 
             if let unit = TapUnit(request: w, onLevel: { [weak self] reading in
-                DispatchQueue.main.async { self?.levels[k] = reading }
+                self?.record(reading, for: k)
             }) {
-                units[k] = unit
+                lock.lock(); units[k] = unit; lock.unlock()
+                failures[k] = nil
             } else {
+                let attempts = (failures[k]?.attempts ?? 0) + 1
+                // 2 s, 8 s, 32 s, capped at 2 minutes.
+                let delay = min(pow(4.0, Double(attempts - 1)) * 2.0, 120.0)
+                failures[k] = (Set(w.processObjects), now.addingTimeInterval(delay), attempts)
                 DispatchQueue.main.async { self.lastError = "Could not capture \(w.bundleID)" }
             }
         }
+
+        // Forget failures for taps nobody wants any more.
+        for k in failures.keys where wanted[k] == nil { failures[k] = nil }
+
+        publishLiveUnits()
     }
 
+    /// Meter readings are staged and drained on a timer rather than dispatched
+    /// per callback. Mirrors AudioRouter.
+    private func record(_ reading: MeterReading, for key: String) {
+        guard os_unfair_lock_trylock(meterLock) else { return }
+        pendingLevels[key] = reading
+        os_unfair_lock_unlock(meterLock)
+    }
+
+    private func publishLiveUnits() {
+        lock.lock(); let keys = Set(units.keys); lock.unlock()
+        os_unfair_lock_lock(meterLock)
+        liveKeys = keys
+        os_unfair_lock_unlock(meterLock)
+        DispatchQueue.main.async { self.syncMeterPump(hasUnits: !keys.isEmpty) }
+    }
+
+    private func syncMeterPump(hasUnits: Bool) {
+        if !hasUnits {
+            meterPump?.cancel()
+            meterPump = nil
+            return
+        }
+        guard meterPump == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 0.033, repeating: 0.033, leeway: .milliseconds(8))
+        timer.setEventHandler { [weak self] in self?.drainLevels() }
+        timer.resume()
+        meterPump = timer
+    }
+
+    private func drainLevels() {
+        os_unfair_lock_lock(meterLock)
+        let batch = pendingLevels
+        let live = liveKeys
+        pendingLevels.removeAll(keepingCapacity: true)
+        os_unfair_lock_unlock(meterLock)
+        for (k, reading) in batch where live.contains(k) { levels[k] = reading }
+    }
+
+    /// Synchronous by design: callers sequence cleanup work immediately after
+    /// it, and a queued reconciliation must not resurrect units they just
+    /// stopped.
     func stopAll() {
-        lock.lock(); defer { lock.unlock() }
-        units.values.forEach { $0.stop() }
+        work.sync {}
+        lock.lock()
+        let all = Array(units.values)
         units.removeAll()
+        lock.unlock()
+        all.forEach { $0.stop() }
+        publishLiveUnits()
         DispatchQueue.main.async { self.levels.removeAll() }
     }
 
@@ -89,7 +211,7 @@ final class AppRedirectEngine: ObservableObject {
     /// "bundleID|outputUID" used internally by apply().
     func setRecorder(bundleID: String, outputUID: String, _ recorder: MixRecorder?) {
         lock.lock(); defer { lock.unlock() }
-        units[key(bundleID, outputUID)]?.recorderSlot.recorder = recorder
+        units[key(bundleID, outputUID)]?.recorderSlot.set(recorder)
     }
 
     /// Destroy any private aggregate devices left behind by a previous run.
@@ -131,6 +253,11 @@ private final class TapUnit {
     private var started = false
     private let onLevel: (MeterReading) -> Void
     private let throttle = MeterThrottle()
+
+    /// False once AVAudioEngine has stopped underneath us — which it does on a
+    /// configuration change. A dead unit left mounted kept the process tap
+    /// alive, so the app stayed muted on its own output and silent everywhere.
+    var isHealthy: Bool { started && engine.isRunning }
 
     init?(request: AppTapRequest, onLevel: @escaping (MeterReading) -> Void) {
         self.processes = request.processObjects
@@ -210,7 +337,7 @@ private final class TapUnit {
         let slot = self.recorderSlot
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024,
                                         format: engine.mainMixerNode.outputFormat(forBus: 0)) { buffer, _ in
-            slot.recorder?.append(buffer)
+            slot.acquire()?.append(buffer)
             guard throttle.shouldFire() else { return }
             onLevel(AudioMeter.reading(for: buffer))
         }

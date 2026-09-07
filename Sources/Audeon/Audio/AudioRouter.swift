@@ -2,6 +2,20 @@ import Foundation
 import AVFoundation
 import CoreAudio
 import Combine
+import os
+
+/// One logical input channel inside the aggregate's stream, as a (base, stride)
+/// pair. Kept as a concrete type so the realtime path can hold these in stack
+/// memory instead of a Swift array.
+struct ChannelRef {
+    let base: UnsafePointer<Float>
+    let stride: Int
+    let frames: Int
+}
+
+/// Hard cap on channels flattened per cycle, so the scratch space is a fixed
+/// stack allocation. No real aggregate reaches this.
+private let maxFlattenedChannels = 64
 
 /// UID prefix for the private aggregate devices Audeon creates for cross-device
 /// routes. Shares the naming convention with the per-app redirect aggregates so
@@ -32,78 +46,192 @@ final class AudioRouter: ObservableObject {
     private var engines: [UUID: AnyRouteEngine] = [:]
     private let lock = NSLock()
 
+    /// Meter readings staged by the audio thread, published on the main thread
+    /// at a fixed rate. Guarded by `meterLock`, which the audio side only ever
+    /// tries to take: a dropped reading costs one frame of meter animation.
+    private var pendingLevels: [UUID: MeterReading] = [:]
+    private let meterLock = UnsafeMutablePointer<os_unfair_lock>.allocate(capacity: 1)
+    private var meterPump: DispatchSourceTimer?
+    /// Route ids with a live engine, so the meter drain does not have to touch
+    /// `engines` (and therefore its lock) from the main thread.
+    private var liveRouteIDs: Set<UUID> = []
+
+    /// Serialises all engine construction and teardown, and keeps the HAL calls
+    /// they make off the main thread.
+    private let work = DispatchQueue(label: "com.audeon.router.apply", qos: .userInitiated)
+
     init(deviceManager: AudioDeviceManager) {
         self.deviceManager = deviceManager
+        meterLock.initialize(to: os_unfair_lock())
         Self.cleanupLeakedAggregates()
     }
 
-    func apply(routes: [Route]) {
-        lock.lock(); defer { lock.unlock() }
+    deinit {
+        meterPump?.cancel()
+        meterLock.deinitialize(count: 1)
+        meterLock.deallocate()
+    }
 
+    /// Audio thread. Never blocks and never allocates once the key exists.
+    private func record(_ reading: MeterReading, for id: UUID) {
+        guard os_unfair_lock_trylock(meterLock) else { return }
+        pendingLevels[id] = reading
+        os_unfair_lock_unlock(meterLock)
+    }
+
+    /// Republish the live route set and resize the meter pump to match.
+    private func publishLiveRoutes() {
+        lock.lock(); let ids = Set(engines.keys); lock.unlock()
+        os_unfair_lock_lock(meterLock)
+        liveRouteIDs = ids
+        os_unfair_lock_unlock(meterLock)
+        DispatchQueue.main.async { self.syncMeterPump(hasEngines: !ids.isEmpty) }
+    }
+
+    /// Runs only while at least one engine is live, so an idle app does not
+    /// wake the main thread 30 times a second. Main thread only.
+    private func syncMeterPump(hasEngines: Bool) {
+        if !hasEngines {
+            meterPump?.cancel()
+            meterPump = nil
+            return
+        }
+        guard meterPump == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 0.033, repeating: 0.033, leeway: .milliseconds(8))
+        timer.setEventHandler { [weak self] in self?.drainLevels() }
+        timer.resume()
+        meterPump = timer
+    }
+
+    private func drainLevels() {
+        os_unfair_lock_lock(meterLock)
+        let batch = pendingLevels
+        let live = liveRouteIDs
+        pendingLevels.removeAll(keepingCapacity: true)
+        os_unfair_lock_unlock(meterLock)
+        for (id, reading) in batch where live.contains(id) { levels[id] = reading }
+    }
+
+    /// Reconcile the live engines against the wanted routes.
+    ///
+    /// Returns immediately. Every HAL call this leads to — creating an
+    /// aggregate device, waiting for it to settle, starting the I/O proc —
+    /// used to run on the main thread, so building a cross-device route froze
+    /// the UI for the duration. The work now runs on a serial queue, and the
+    /// engines dictionary lock is held only across dictionary operations,
+    /// never across a HAL call, so a main-thread reader never waits on CoreAudio.
+    func apply(routes: [Route]) {
+        work.async { [weak self] in self?.applyOnWorker(routes) }
+    }
+
+    private func applyOnWorker(_ routes: [Route]) {
         // A new reconciliation supersedes any previous failure. Without this,
         // one stale error banner stayed on screen forever.
         DispatchQueue.main.async { if self.lastError != nil { self.lastError = nil } }
 
         let wanted = Set(routes.map(\.id))
+
+        // Take the doomed engines out under the lock, stop them outside it.
+        var doomed: [(UUID, AnyRouteEngine)] = []
+        lock.lock()
         for (id, engine) in engines where !wanted.contains(id) {
-            engine.stop(); engines[id] = nil
+            doomed.append((id, engine))
+            engines[id] = nil
+        }
+        lock.unlock()
+        for (id, engine) in doomed {
+            engine.stop()
             DispatchQueue.main.async { self.levels[id] = nil }
         }
 
         for route in routes {
             guard let inID = deviceManager.deviceID(forUID: route.inputDeviceUID),
-                  let outID = deviceManager.deviceID(forUID: route.outputDeviceUID) else { continue }
+                  let outID = deviceManager.deviceID(forUID: route.outputDeviceUID) else {
+                // One of the devices has gone. Leaving the engine started kept
+                // a dead route running with a stale meter and leaked its
+                // aggregate and I/O proc for the lifetime of the app.
+                lock.lock(); let dead = engines.removeValue(forKey: route.id); lock.unlock()
+                if let dead {
+                    dead.stop()
+                    DispatchQueue.main.async { self.levels[route.id] = nil }
+                }
+                continue
+            }
 
-            if let engine = engines[route.id],
-               engine.inputDeviceUID == route.inputDeviceUID, engine.outputDeviceUID == route.outputDeviceUID,
-               engine.inputDeviceID == inID, engine.outputDeviceID == outID {
-                engine.configure(route)
+            lock.lock(); let existing = engines[route.id]; lock.unlock()
+            if let existing, existing.isHealthy,
+               existing.inputDeviceUID == route.inputDeviceUID, existing.outputDeviceUID == route.outputDeviceUID,
+               existing.inputDeviceID == inID, existing.outputDeviceID == outID {
+                existing.configure(route)
+                continue
+            }
+
+            // Tear down whatever was here and clear the slot before attempting
+            // the new engine, so a failed start leaves no stale entry that
+            // could later masquerade as a live route.
+            lock.lock(); let stale = engines.removeValue(forKey: route.id); lock.unlock()
+            stale?.stop()
+
+            // A device that has never been selected in System Settings keeps
+            // whatever mute/volume state it last had. Wake it once so a fresh
+            // route is not silently muted at the hardware level.
+            deviceManager.wakeOutputIfSilent(forUID: route.outputDeviceUID)
+
+            let id = route.id
+            // Writes into a pending map the main thread drains on a timer.
+            // The previous version allocated a dispatch block on the audio
+            // thread every time the meter fired.
+            let onLevel: (MeterReading) -> Void = { [weak self] reading in
+                self?.record(reading, for: id)
+            }
+            let engine: AnyRouteEngine
+            if route.inputDeviceUID == route.outputDeviceUID {
+                engine = SameDeviceRouteEngine(
+                    inputDeviceUID: route.inputDeviceUID, inputDeviceID: inID,
+                    outputDeviceUID: route.outputDeviceUID, outputDeviceID: outID,
+                    onLevel: onLevel)
             } else {
-                // Tear down whatever was here and clear the slot before
-                // attempting the new engine, so a failed start leaves no stale
-                // entry that could later masquerade as a live route.
-                engines[route.id]?.stop()
-                engines[route.id] = nil
-
-                // A device that has never been selected in System Settings
-                // keeps whatever mute/volume state it last had. Wake it once
-                // so a fresh route is not silently muted at the hardware level.
-                deviceManager.wakeOutputIfSilent(forUID: route.outputDeviceUID)
-
-                let id = route.id
-                let onLevel: (MeterReading) -> Void = { [weak self] reading in
-                    DispatchQueue.main.async { self?.levels[id] = reading }
-                }
-                let engine: AnyRouteEngine
-                if route.inputDeviceUID == route.outputDeviceUID {
-                    engine = SameDeviceRouteEngine(
-                        inputDeviceUID: route.inputDeviceUID, inputDeviceID: inID,
-                        outputDeviceUID: route.outputDeviceUID, outputDeviceID: outID,
-                        onLevel: onLevel)
-                } else {
-                    engine = CrossDeviceRouteEngine(
-                        inputDeviceUID: route.inputDeviceUID, inputDeviceID: inID,
-                        outputDeviceUID: route.outputDeviceUID, outputDeviceID: outID,
-                        onLevel: onLevel)
-                }
-                do { try engine.start(route); engines[route.id] = engine }
-                catch {
-                    DispatchQueue.main.async { self.lastError = error.localizedDescription }
-                }
+                engine = CrossDeviceRouteEngine(
+                    inputDeviceUID: route.inputDeviceUID, inputDeviceID: inID,
+                    outputDeviceUID: route.outputDeviceUID, outputDeviceID: outID,
+                    onLevel: onLevel)
+            }
+            do {
+                try engine.start(route)
+                lock.lock(); engines[route.id] = engine; lock.unlock()
+            } catch {
+                DispatchQueue.main.async { self.lastError = error.localizedDescription }
             }
         }
+
+        publishLiveRoutes()
     }
 
     /// Attach or detach a recorder on a live route's engine.
     func setRecorder(routeID: UUID, _ recorder: MixRecorder?) {
         lock.lock(); defer { lock.unlock() }
-        engines[routeID]?.recorderSlot.recorder = recorder
+        engines[routeID]?.recorderSlot.set(recorder)
     }
 
-    func stopAll() {
+    /// True when a live engine currently carries this route id. Recording
+    /// mounts use it to pick a group member that is actually running.
+    func hasEngine(routeID: UUID) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        engines.values.forEach { $0.stop() }
+        return engines[routeID] != nil
+    }
+
+    /// Synchronous by design: callers sequence cleanup work immediately after
+    /// it, and a queued reconciliation must not be able to resurrect engines
+    /// they just stopped.
+    func stopAll() {
+        work.sync {}
+        lock.lock()
+        let all = Array(engines.values)
         engines.removeAll()
+        lock.unlock()
+        all.forEach { $0.stop() }
+        publishLiveRoutes()
         DispatchQueue.main.async { self.levels.removeAll() }
     }
 
@@ -140,6 +268,11 @@ protocol AnyRouteEngine: AnyObject {
     var inputDeviceID: AudioDeviceID { get }
     var outputDeviceID: AudioDeviceID { get }
     var recorderSlot: RecorderSlot { get }
+    /// False once the engine has stopped underneath us. AVAudioEngine stops
+    /// itself on a configuration change (sample-rate change, device
+    /// reconfigured by another app), and a reuse check that only asked whether
+    /// an engine object existed kept the dead one forever.
+    var isHealthy: Bool { get }
     func start(_ route: Route) throws
     func configure(_ route: Route)
     func stop()
@@ -228,7 +361,7 @@ private final class SameDeviceRouteEngine: AnyRouteEngine {
         let slot = self.recorderSlot
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024,
                                         format: engine.mainMixerNode.outputFormat(forBus: 0)) { buffer, _ in
-            slot.recorder?.append(buffer)
+            slot.acquire()?.append(buffer)
             guard throttle.shouldFire() else { return }
             onLevel(AudioMeter.reading(for: buffer))
         }
@@ -254,6 +387,11 @@ private final class SameDeviceRouteEngine: AnyRouteEngine {
         MagicBoost.configure(magicBoost, enabled: route.magicBoost)
     }
 
+    /// AVAudioEngine stops itself when the device is reconfigured (a sample
+    /// rate change, another app taking the device). Reporting that here is what
+    /// makes the router rebuild the route instead of keeping a silent engine.
+    var isHealthy: Bool { started && engine.isRunning }
+
     func stop() {
         if started { engine.mainMixerNode.removeTap(onBus: 0); engine.stop(); started = false }
     }
@@ -271,6 +409,8 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
     private var aggregateID: AudioObjectID = 0
     private var procID: AudioDeviceIOProcID?
     private var running = false
+
+    var isHealthy: Bool { running && aggregateID != 0 && procID != nil }
     private var sampleRate: Double = 48000
 
     /// How many leading channels of the aggregate's input stream belong to the
@@ -338,9 +478,18 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
             throw RouteEngineError.aggregateCreate(aggStatus)
         }
         // Give CoreAudio a moment to settle the aggregate's derived clock and
-        // stream formats before I/O begins.
-        Thread.sleep(forTimeInterval: 0.05)
-        sampleRate = Self.nominalSampleRate(aggregateID) ?? 48000
+        // stream formats before I/O begins. Poll for the property the next
+        // line actually reads rather than sleeping a flat 50 ms: a healthy
+        // aggregate reports in a few milliseconds, and the cap is the same
+        // 50 ms the unconditional sleep always paid.
+        var settled: Double?
+        let deadline = Date().addingTimeInterval(0.05)
+        while Date() < deadline {
+            settled = Self.nominalSampleRate(aggregateID)
+            if let rate = settled, rate > 0 { break }
+            Thread.sleep(forTimeInterval: 0.002)
+        }
+        sampleRate = settled.flatMap { $0 > 0 ? $0 : nil } ?? 48000
 
         // The output sub-device is listed first, so its own input channels (if
         // it is a duplex device) lead the aggregate's input stream. The real
@@ -397,24 +546,42 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
         let outList = UnsafeMutableAudioBufferListPointer(output)
 
         // Flatten the input side into logical channels (a stream buffer can
-        // carry several interleaved channels).
-        var allInChannels: [(base: UnsafePointer<Float>, stride: Int, frames: Int)] = []
-        allInChannels.reserveCapacity(8)
-        for buf in inList {
-            guard let data = buf.mData, buf.mNumberChannels > 0 else { continue }
-            let chs = Int(buf.mNumberChannels)
-            let frames = Int(buf.mDataByteSize) / (MemoryLayout<Float>.size * chs)
-            let base = data.assumingMemoryBound(to: Float.self)
-            for c in 0..<chs {
-                allInChannels.append((base: UnsafePointer(base) + c, stride: chs, frames: frames))
+        // carry several interleaved channels). Stack memory, not a Swift array:
+        // this runs on the realtime thread every cycle, and the previous
+        // version heap-allocated twice per callback even when idle.
+        withUnsafeTemporaryAllocation(of: ChannelRef.self, capacity: maxFlattenedChannels) { scratch in
+            var found = 0
+            for buf in inList {
+                guard let data = buf.mData, buf.mNumberChannels > 0 else { continue }
+                let chs = Int(buf.mNumberChannels)
+                let frames = Int(buf.mDataByteSize) / (MemoryLayout<Float>.size * chs)
+                let base = data.assumingMemoryBound(to: Float.self)
+                for c in 0..<chs where found < maxFlattenedChannels {
+                    scratch[found] = ChannelRef(base: UnsafePointer(base) + c, stride: chs, frames: frames)
+                    found += 1
+                }
             }
-        }
 
-        // Drop the leading channels that belong to a duplex output device, so
-        // what remains is the real source. Clamp defensively: never skip so far
-        // that nothing is left, or the route would silence itself.
-        let skip = inputOffset < allInChannels.count ? inputOffset : 0
-        let inChannels = Array(allInChannels[skip...])
+            // Drop the leading channels that belong to a duplex output device,
+            // so what remains is the real source. Clamp defensively: never skip
+            // so far that nothing is left, or the route would silence itself.
+            let skip = inputOffset < found ? inputOffset : 0
+            renderChannels(inChannels: UnsafeMutableBufferPointer(rebasing: scratch[skip..<found]),
+                           outList: outList, gain: gain, dsp: dsp, slot: slot,
+                           sampleRate: sampleRate, throttle: throttle, onLevel: onLevel)
+        }
+    }
+
+    /// The per-cycle mixing body, split out so the channel scratch space above
+    /// stays a stack allocation with a well-defined lifetime.
+    private static func renderChannels(inChannels: UnsafeMutableBufferPointer<ChannelRef>,
+                                       outList: UnsafeMutableAudioBufferListPointer,
+                                       gain: Float,
+                                       dsp: CrossDeviceDSPChain?,
+                                       slot: RecorderSlot,
+                                       sampleRate: Double,
+                                       throttle: MeterThrottle,
+                                       onLevel: @escaping (MeterReading) -> Void) {
 
         // Processed stereo from the DSP chain, when available this cycle.
         var processed: (left: UnsafePointer<Float>, right: UnsafePointer<Float>)?
@@ -485,26 +652,22 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
             }
         }
 
-        if let recorder = slot.recorder, !inChannels.isEmpty {
+        if let recorder = slot.acquire(), !inChannels.isEmpty {
             // Only taken while actually recording, so the steady-state path
-            // stays copy-free. Records exactly what is sent to the output.
+            // stays copy-free. Records exactly what is sent to the output, and
+            // pushes straight from the source pointers: the realtime thread
+            // builds no Swift array and touches no file.
             if let processed {
-                let frames = processedFrames
-                var left = [Float](repeating: 0, count: frames)
-                var right = [Float](repeating: 0, count: frames)
-                for f in 0..<frames { left[f] = processed.left[f]; right[f] = processed.right[f] }
-                recorder.append(deinterleaved: [left, right], sampleRate: sampleRate)
+                recorder.push(frames: processedFrames, sampleRate: sampleRate, gain: 1,
+                              left: processed.left, leftStride: 1,
+                              right: processed.right, rightStride: 1)
             } else {
-                let frames = inChannels[0].frames
-                let chCount = min(inChannels.count, 2)
-                var copies: [[Float]] = []
-                for c in 0..<chCount {
-                    let src = inChannels[c]
-                    var channel = [Float](repeating: 0, count: frames)
-                    for f in 0..<min(frames, src.frames) { channel[f] = src.base[f * src.stride] * gain }
-                    copies.append(channel)
-                }
-                recorder.append(deinterleaved: copies, sampleRate: sampleRate)
+                let l = inChannels[0]
+                let r = inChannels.count > 1 ? inChannels[1] : nil
+                recorder.push(frames: min(l.frames, r?.frames ?? l.frames),
+                              sampleRate: sampleRate, gain: gain,
+                              left: l.base, leftStride: l.stride,
+                              right: r?.base, rightStride: r?.stride ?? 1)
             }
         }
 

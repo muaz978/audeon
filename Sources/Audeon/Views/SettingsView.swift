@@ -4,14 +4,30 @@ import ServiceManagement
 
 /// Tabbed settings, in the spirit of the SoundSource Settings window.
 struct SettingsView: View {
+    // A SwiftUI sheet draws no window chrome, so without an explicit control
+    // there was no way to close this at all: it covered the routing canvas for
+    // the rest of the session.
+    @Environment(\.dismiss) private var dismiss
+
     var body: some View {
-        TabView {
-            GeneralTab().tabItem { Label("General", systemImage: "switch.2") }
-            DevicesTab().tabItem { Label("Devices", systemImage: "hifispeaker.2") }
-            AppearanceTab().tabItem { Label("Appearance", systemImage: "eye") }
-            AudioTab().tabItem { Label("Audio", systemImage: "hifispeaker") }
+        VStack(spacing: 0) {
+            TabView {
+                GeneralTab().tabItem { Label("General", systemImage: "switch.2") }
+                DevicesTab().tabItem { Label("Devices", systemImage: "hifispeaker.2") }
+                AppearanceTab().tabItem { Label("Appearance", systemImage: "eye") }
+                AudioTab().tabItem { Label("Audio", systemImage: "hifispeaker") }
+            }
+            .frame(width: 540, height: 580)
+
+            Divider()
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(12)
         }
-        .frame(width: 540, height: 580)
+        .frame(width: 540)
     }
 }
 
@@ -152,7 +168,9 @@ private struct GeneralTab: View {
                     .onChange(of: showHideHotkey) { _, on in ShowHideHotkey.shared.setEnabled(on) }
                 Toggle("Super Volume Keys", isOn: $superVolumeKeys)
                     .onChange(of: superVolumeKeys) { _, on in
-                        let ok = SuperVolumeKeys.shared.setEnabled(on)
+                        // The user just asked for this, so prompting is
+                        // wanted here -- unlike the silent restore at launch.
+                        let ok = SuperVolumeKeys.shared.setEnabled(on, prompt: true)
                         if on && !ok {
                             superVolumeKeys = false
                             volumeKeysNote = "Grant Audeon Accessibility access in the window macOS just opened, then turn this on again."
@@ -225,11 +243,9 @@ private struct AudioTab: View {
             }
             Section("Maintenance") {
                 Button("Clean up leftover Audeon devices") {
-                    AppRedirectEngine.cleanupLeakedAggregates()
-                    AudioRouter.cleanupLeakedAggregates()
-                    store.deviceManager.refresh()
+                    store.cleanUpLeftoverDevices()
                 }
-                Text("Removes any private capture or routing devices left behind by an unexpected quit, or by a route that failed to connect.")
+                Text("Removes any private capture or routing devices left behind by an unexpected quit, or by a route that failed to connect. Live routes are rebuilt afterwards.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
