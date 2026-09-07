@@ -282,6 +282,23 @@ static UInt64                       gDevice2_IOIsRunning                = 0;
 static const UInt32                 kDevice_RingBufferSize              = 16384;
 static Float64                      gDevice_HostTicksPerFrame           = 0.0;
 static Float64                      gDevice_AdjustedTicksPerFrame       = 0.0;
+
+//  Zero-timestamp anchor
+//  ---------------------
+//  These four are one value: the point (host time, sample time) the device's clock
+//  is measured from, plus how far it has advanced. BlackHole_GetZeroTimeStamp reads
+//  all of them and advances two of them on the HAL's timing thread, and
+//  BlackHole_StartIO resets all four when it publishes a fresh ring buffer. Both
+//  sides must therefore hold gDevice_IOMutex - it is the lock GetZeroTimeStamp
+//  already takes, and it is the only lock this set has. Resetting them under
+//  gPlugIn_StateMutex instead does not exclude GetZeroTimeStamp at all, and a
+//  GetZeroTimeStamp that lands mid-reset vends a mixed anchor: a new host time
+//  against an old tick offset, which the HAL reads as the device's clock jumping.
+//
+//  Lock order, where both are held, is gPlugIn_StateMutex -> gDevice_IOMutex.
+//  StartIO is the only place that holds the pair; GetZeroTimeStamp is the only
+//  other holder of gDevice_IOMutex and takes nothing while it holds it, so no path
+//  acquires the two in the opposite order.
 static Float64                      gDevice_PreviousTicks               = 0.0;
 static UInt64                       gDevice_NumberTimeStamps            = 0;
 static Float64                      gDevice_AnchorSampleTime            = 0.0;
@@ -370,6 +387,28 @@ static const UInt32                 kDevice_SampleRatesSize             = sizeof
 //  (NULL) pointer and moves no audio, or is counted and waited for by StopIO.
 static _Atomic(Float32*)            gRingBuffer                         = NULL;
 static _Atomic(UInt64)              gDevice_IOCyclesInFlight            = 0;
+
+//  Shared ring buffer cycle state
+//  ------------------------------
+//  How far the output side has written into gRingBuffer, and whether the read side
+//  has already zeroed it. These were function-level statics inside
+//  BlackHole_DoIOOperation, read-modify-written with no synchronisation by the two
+//  IO threads the HAL runs for this driver's two devices.
+//
+//  They stay shared rather than becoming per-device, because they describe the one
+//  ring buffer both devices read and write, not one device's own progress. That
+//  sharing is load-bearing: audio written to one device's output is exactly what
+//  makes the other device's input non-silent, which is how mirroring between the
+//  two published devices works. Per-device copies would leave the second device's
+//  input permanently muted, since its own marker would never advance.
+//
+//  The real hazard is narrower than "shared state". The write side stored the
+//  sample time unconditionally, so a device writing on a lower sample-time base
+//  dragged the marker backwards and tripped the read side's mute test for both
+//  devices. Taking the maximum keeps it monotonic, and making both fields atomic
+//  removes the torn read. No lock is taken: the realtime IO path must never block.
+static _Atomic(Float64)             gRing_LastOutputSampleTime          = 0.0;
+static atomic_bool                  gRing_IsBufferClear                 = true;
 
 
 //==================================================================================================
@@ -4481,10 +4520,21 @@ static OSStatus	BlackHole_StartIO(AudioServerPlugInDriverRef inDriver, AudioObje
             }
             else
             {
+                //  Re-anchor the device clock under the lock that owns it. The state
+                //  lock held here does not exclude BlackHole_GetZeroTimeStamp, which
+                //  reads and advances this anchor under gDevice_IOMutex, so the reset
+                //  has to take that lock too or a timestamp read racing this start
+                //  returns a half-updated anchor. Nothing but these four stores runs
+                //  inside it - the allocation above is deliberately outside, so the
+                //  timing thread never waits on calloc.
+                pthread_mutex_lock(&gDevice_IOMutex);
+
                 gDevice_NumberTimeStamps = 0;
                 gDevice_AnchorSampleTime = 0;
                 gDevice_AnchorHostTime = mach_absolute_time();
                 gDevice_PreviousTicks = 0;
+
+                pthread_mutex_unlock(&gDevice_IOMutex);
 
                 atomic_store_explicit(&gRingBuffer, theNewRingBuffer, memory_order_seq_cst);
             }
@@ -4683,7 +4733,7 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
 {
 	//	This is called to actually perform a given operation. 
 	
-	#pragma unused(inClientID, inIOCycleInfo, ioSecondaryBuffer, inDeviceObjectID)
+	#pragma unused(inClientID, ioSecondaryBuffer)
 	
 	//	declare the local variables
 	OSStatus theAnswer = 0;
@@ -4720,24 +4770,23 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
         secondPartFrameSize = inIOBufferFrameSize - firstPartFrameSize;
     }
     
-    // Keep track of last outputSampleTime and the cleared buffer status.
-    static Float64 lastOutputSampleTime = 0;
-    static Boolean isBufferClear = true;
-    
+    // Keep track of last outputSampleTime and the cleared buffer status, per device.
+    // The device ID was validated above, so it is one of exactly these two, and this
+    // slot belongs to the IO thread now running - no other thread touches it.
     // From BlackHole to Application
     if(inOperationID == kAudioServerPlugInIOOperationReadInput)
     {
         // If mute is one let's just fill the buffer with zeros or if there's no apps outputting audio
-        if (theRingBuffer == NULL || gMute_Master_Value || lastOutputSampleTime - inIOBufferFrameSize < inIOCycleInfo->mInputTime.mSampleTime)
+        if (theRingBuffer == NULL || gMute_Master_Value || atomic_load_explicit(&gRing_LastOutputSampleTime, memory_order_relaxed) - inIOBufferFrameSize < inIOCycleInfo->mInputTime.mSampleTime)
         {
             // Clear the ioMainBuffer
             vDSP_vclr(ioMainBuffer, 1, inIOBufferFrameSize * kNumber_Of_Channels);
             
             // Clear the ring buffer.
-            if ((theRingBuffer != NULL) && !isBufferClear)
+            if ((theRingBuffer != NULL) && !atomic_load_explicit(&gRing_IsBufferClear, memory_order_relaxed))
             {
                 vDSP_vclr(theRingBuffer, 1, kRing_Buffer_Frame_Size * kNumber_Of_Channels);
-                isBufferClear = true;
+                atomic_store_explicit(&gRing_IsBufferClear, true, memory_order_relaxed);
             }
         }
         else
@@ -4775,9 +4824,20 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
             memcpy(theRingBuffer + ringBufferFrameLocationStart * kNumber_Of_Channels, ioMainBuffer, firstPartFrameSize * kNumber_Of_Channels * sizeof(Float32));
             memcpy(theRingBuffer, (Float32*)ioMainBuffer + firstPartFrameSize * kNumber_Of_Channels, secondPartFrameSize * kNumber_Of_Channels * sizeof(Float32));
             
-            // Save the last output time.
-            lastOutputSampleTime = inIOCycleInfo->mOutputTime.mSampleTime + inIOBufferFrameSize;
-            isBufferClear = false;
+            // Save the last output time, keeping the marker monotonic: whichever
+            // device has written furthest into the shared ring wins. Storing it
+            // unconditionally let a device on a lower sample-time base drag the
+            // marker backwards, which muted the other device's input.
+            Float64 theCandidate = inIOCycleInfo->mOutputTime.mSampleTime + inIOBufferFrameSize;
+            Float64 theObserved = atomic_load_explicit(&gRing_LastOutputSampleTime, memory_order_relaxed);
+            while((theCandidate > theObserved) &&
+                  !atomic_compare_exchange_weak_explicit(&gRing_LastOutputSampleTime, &theObserved, theCandidate,
+                                                         memory_order_relaxed, memory_order_relaxed))
+            {
+                //  compare_exchange reloads theObserved on failure; loop until this
+                //  cycle wins or another device has already written further.
+            }
+            atomic_store_explicit(&gRing_IsBufferClear, false, memory_order_relaxed);
         }
     }
 
