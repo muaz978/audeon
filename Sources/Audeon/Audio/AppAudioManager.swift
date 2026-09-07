@@ -137,9 +137,14 @@ final class AppAudioManager: ObservableObject {
         // Fallback: a helper's bundle id ("com.microsoft.edgemac.helper") starts
         // with the main app's bundle id. Find the running app that matches.
         if let helperBundle = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier {
+            // Require the match to end on a component boundary. A bare prefix
+            // test also matched unrelated neighbours ("com.acme.mail" against
+            // "com.acme.mailbox"), so routing one app tapped and muted another.
             return NSWorkspace.shared.runningApplications.first {
                 $0.activationPolicy == .regular
-                    && ($0.bundleIdentifier.map { helperBundle.hasPrefix($0) } ?? false)
+                    && ($0.bundleIdentifier.map {
+                        helperBundle == $0 || helperBundle.hasPrefix($0 + ".")
+                    } ?? false)
             }
         }
         return nil

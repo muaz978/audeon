@@ -25,27 +25,41 @@ final class SystemAudioController: ObservableObject {
         let out = currentUID(kAudioHardwarePropertyDefaultOutputDevice)
         let inp = currentUID(kAudioHardwarePropertyDefaultInputDevice)
         let sys = currentUID(kAudioHardwarePropertyDefaultSystemOutputDevice)
-        DispatchQueue.main.async {
-            self.defaultOutputUID = out
-            self.defaultInputUID = inp
-            self.defaultSystemOutputUID = sys
+        let apply = { [self] in
+            if defaultOutputUID != out { defaultOutputUID = out }
+            if defaultInputUID != inp { defaultInputUID = inp }
+            if defaultSystemOutputUID != sys { defaultSystemOutputUID = sys }
         }
+        // Applied inline on the main thread so a caller that reads these
+        // straight after refresh() (launch-time adoption) sees real values
+        // rather than the pre-init nils.
+        if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
     }
 
-    func setDefaultOutput(_ uid: String) { setDefault(uid, kAudioHardwarePropertyDefaultOutputDevice) }
-    func setDefaultInput(_ uid: String) { setDefault(uid, kAudioHardwarePropertyDefaultInputDevice) }
-    func setDefaultSystemOutput(_ uid: String) { setDefault(uid, kAudioHardwarePropertyDefaultSystemOutputDevice) }
+    /// Each returns false when the uid does not resolve to a live device or
+    /// CoreAudio rejects the change. Callers that are restoring the system
+    /// output MUST check it: a silent no-op here leaves the Mac pointed at a
+    /// device that produces no sound.
+    @discardableResult
+    func setDefaultOutput(_ uid: String) -> Bool { setDefault(uid, kAudioHardwarePropertyDefaultOutputDevice) }
+    @discardableResult
+    func setDefaultInput(_ uid: String) -> Bool { setDefault(uid, kAudioHardwarePropertyDefaultInputDevice) }
+    @discardableResult
+    func setDefaultSystemOutput(_ uid: String) -> Bool { setDefault(uid, kAudioHardwarePropertyDefaultSystemOutputDevice) }
 
     // MARK: - Internals
 
-    private func setDefault(_ uid: String, _ selector: AudioObjectPropertySelector) {
-        guard let id = deviceManager.deviceID(forUID: uid) else { return }
+    private func setDefault(_ uid: String, _ selector: AudioObjectPropertySelector) -> Bool {
+        guard let id = deviceManager.deviceID(forUID: uid) else { return false }
         var dev = id
         var addr = address(selector)
-        AudioObjectSetPropertyData(
+        let status = AudioObjectSetPropertyData(
             AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil,
             UInt32(MemoryLayout<AudioDeviceID>.size), &dev
         )
+        guard status == noErr else { return false }
+        refresh()
+        return true
     }
 
     private func currentUID(_ selector: AudioObjectPropertySelector) -> String? {
