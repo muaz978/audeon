@@ -2139,22 +2139,26 @@ static OSStatus	BlackHole_SetBoxPropertyData(AudioServerPlugInDriverRef inDriver
 			{
 				FailWithAction(inData == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "BlackHole_SetBoxPropertyData: NULL data for kAudioObjectPropertyName");
 				FailWithAction(inDataSize != sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_SetBoxPropertyData: wrong size for the data for kAudioObjectPropertyName");
-				CFStringRef* theNewName = (CFStringRef*)inData;
+				//	inData was already rejected above if it was NULL, so the pointer
+				//	itself is known good here; only the string it points at can be
+				//	NULL. Testing the pointer again read as protective while the
+				//	assignment below dereferenced it unconditionally regardless.
+				CFStringRef theNewName = *(CFStringRef*)inData;
 				pthread_mutex_lock(&gPlugIn_StateMutex);
-				if((theNewName != NULL) && (*theNewName != NULL))
+				if(theNewName != NULL)
 				{
-					CFRetain(*theNewName);
+					CFRetain(theNewName);
 				}
 				if(gBox_Name != NULL)
 				{
 					CFRelease(gBox_Name);
 				}
-				gBox_Name = *theNewName;
+				gBox_Name = theNewName;
 				pthread_mutex_unlock(&gPlugIn_StateMutex);
 				//	persist the new name so it survives a restart of the driver
-				if((theNewName != NULL) && (*theNewName != NULL))
+				if(theNewName != NULL)
 				{
-					gPlugIn_Host->WriteToStorage(gPlugIn_Host, CFSTR("box name"), *theNewName);
+					gPlugIn_Host->WriteToStorage(gPlugIn_Host, CFSTR("box name"), theNewName);
 				}
 				else
 				{
