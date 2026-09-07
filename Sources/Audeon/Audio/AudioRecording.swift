@@ -5,8 +5,8 @@ import os
 /// Writes a source's processed audio to a file.
 ///
 /// The audio thread never touches the file. `append` and `push` copy samples
-/// into a fixed, pre-allocated ring under a lock they only ever *try* to take,
-/// and a dedicated writer thread drains that ring and owns the `AVAudioFile`
+/// into a fixed, pre-allocated ring, and a dedicated writer thread drains that
+/// ring and owns the `AVAudioFile`
 /// exclusively. Three things follow that the previous design could not
 /// guarantee: the realtime thread performs no allocation, no disk I/O and no
 /// `AVAudioFile` access; stopping cannot race a write; and the file is opened
@@ -99,12 +99,10 @@ final class MixRecorder {
               right: UnsafePointer<Float>?, rightStride: Int) {
         guard frames > 0 else { return }
         let channels = right == nil ? 1 : 2
-        guard os_unfair_lock_trylock(lock) else { return }
-        defer { os_unfair_lock_unlock(lock) }
-        guard prepareLocked(channels: channels, sampleRate: sampleRate),
-              reserveLocked(frames * channels) else { return }
+        let count = frames * channels
+        guard let start = reserve(count: count, channels: channels, sampleRate: sampleRate) else { return }
 
-        var w = head
+        var w = start
         if let right {
             for f in 0..<frames {
                 ring[w] = left[f * leftStride] * gain; w = (w + 1) & Self.ringMask
@@ -115,38 +113,30 @@ final class MixRecorder {
                 ring[w] = left[f * leftStride] * gain; w = (w + 1) & Self.ringMask
             }
         }
-        head = w
-        filled += frames * channels
+        publish(count: count, from: start)
     }
 
     private func write(planar data: UnsafePointer<UnsafeMutablePointer<Float>>,
                        frames: Int, channels: Int, sampleRate: Double) {
-        guard os_unfair_lock_trylock(lock) else { return }
-        defer { os_unfair_lock_unlock(lock) }
-        guard prepareLocked(channels: channels, sampleRate: sampleRate),
-              reserveLocked(frames * channels) else { return }
-        var w = head
+        let count = frames * channels
+        guard let start = reserve(count: count, channels: channels, sampleRate: sampleRate) else { return }
+        var w = start
         for f in 0..<frames {
             for c in 0..<channels {
                 ring[w] = data[c][f]; w = (w + 1) & Self.ringMask
             }
         }
-        head = w
-        filled += frames * channels
+        publish(count: count, from: start)
     }
 
     private func write(interleaved data: UnsafePointer<Float>, count: Int,
                        channels: Int, sampleRate: Double) {
-        guard os_unfair_lock_trylock(lock) else { return }
-        defer { os_unfair_lock_unlock(lock) }
-        guard prepareLocked(channels: channels, sampleRate: sampleRate),
-              reserveLocked(count) else { return }
-        var w = head
+        guard let start = reserve(count: count, channels: channels, sampleRate: sampleRate) else { return }
+        var w = start
         for i in 0..<count {
             ring[w] = data[i]; w = (w + 1) & Self.ringMask
         }
-        head = w
-        filled += count
+        publish(count: count, from: start)
     }
 
     /// Adopt the incoming format, or ask the writer to roll over to a new
@@ -167,14 +157,36 @@ final class MixRecorder {
         return false
     }
 
-    /// Caller holds `lock`. Drops the buffer rather than overwriting unread
-    /// samples: a gap is recoverable, interleaved garbage is not.
-    private func reserveLocked(_ count: Int) -> Bool {
+    /// Claim `count` slots and return where to start writing, or nil when the
+    /// format is rolling over or the ring is genuinely full. Dropping on a full
+    /// ring is deliberate: a gap is recoverable, interleaved garbage is not.
+    ///
+    /// Takes the lock rather than trying it. Both sides hold it only across
+    /// index arithmetic -- the sample copies happen outside it on both the
+    /// producer and the writer -- so the wait is a few instructions and
+    /// os_unfair_lock donates priority to whoever holds it. Trying the lock and
+    /// giving up instead meant a contended cycle silently discarded that
+    /// buffer, which for a recording is lost audio rather than a dropped meter
+    /// frame.
+    private func reserve(count: Int, channels: Int, sampleRate: Double) -> Int? {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        guard prepareLocked(channels: channels, sampleRate: sampleRate) else { return nil }
         guard count <= Self.ringCapacity - filled else {
             didOverflow = true
-            return false
+            return nil
         }
-        return true
+        return head
+    }
+
+    /// Make the samples just written visible to the writer thread. `head` is
+    /// only ever advanced here, by the single producer, so it is stable between
+    /// the reserve above and this call.
+    private func publish(count: Int, from start: Int) {
+        os_unfair_lock_lock(lock)
+        head = (start + count) & Self.ringMask
+        filled += count
+        os_unfair_lock_unlock(lock)
     }
 
     // MARK: - Main-thread side
@@ -226,23 +238,39 @@ final class MixRecorder {
             var channels = 0
             var done = false
 
+            var readFrom = 0
             os_unfair_lock_lock(lock)
             if awaitingRollover && filled == 0 {
                 rollover = true
             } else {
-                let n = min(filled, Self.drainChunk)
-                if n > 0 {
-                    var r = tail
-                    for i in 0..<n { scratch[i] = ring[r]; r = (r + 1) & Self.ringMask }
-                    tail = r
-                    filled -= n
-                    drained = n
-                }
+                // Decide what to take, but copy it out below with the lock
+                // released. Holding the lock across a chunk-sized copy made the
+                // audio side's trylock fail constantly under load, and a failed
+                // trylock drops the buffer -- which silently loses recorded
+                // audio. The critical sections here are now O(1).
+                drained = min(filled, Self.drainChunk)
+                readFrom = tail
                 rate = ringSampleRate
                 channels = ringChannels
-                done = stopping && filled == 0
             }
             os_unfair_lock_unlock(lock)
+
+            if drained > 0 {
+                // Safe without the lock: the producer only ever writes to the
+                // free region beyond `head`, and `filled` is not reduced until
+                // after this copy, so it cannot overwrite what is being read.
+                var r = readFrom
+                for i in 0..<drained { scratch[i] = ring[r]; r = (r + 1) & Self.ringMask }
+                os_unfair_lock_lock(lock)
+                tail = r
+                filled -= drained
+                done = stopping && filled == 0
+                os_unfair_lock_unlock(lock)
+            } else if !rollover {
+                os_unfair_lock_lock(lock)
+                done = stopping && filled == 0
+                os_unfair_lock_unlock(lock)
+            }
 
             if rollover {
                 // Close the old segment BEFORE clearing the flag, so a push
