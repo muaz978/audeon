@@ -40,7 +40,7 @@ jobs:
       # Actions are pinned to full commit SHAs: this job holds
       # security-events: write, and a mutable tag could be repointed at any time.
       - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
@@ -68,13 +68,17 @@ jobs:
   # get no static analysis at all. shellcheck is preinstalled on macOS runners.
   shellcheck:
     name: Analyze (shell)
-    runs-on: macos-14
+    # Ubuntu, not macos-14: shellcheck ships on the Ubuntu runner image and is
+    # absent from the macOS one, and linting these scripts needs no macOS
+    # toolchain. Keeping it here also stops a lint failure from burning a
+    # macOS runner minute.
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Run shellcheck
         run: |
