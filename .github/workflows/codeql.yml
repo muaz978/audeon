@@ -11,12 +11,12 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: codeql-${{ github.ref }}
+  group: codeql-${{ github.ref }}-${{ github.workflow }}
   cancel-in-progress: true
 
 jobs:
   analyze:
-    name: Analyze (swift)
+    name: Analyze (${{ matrix.language }})
     runs-on: macos-14
     timeout-minutes: 30
     permissions:
@@ -24,19 +24,59 @@ jobs:
       actions: read
       contents: read
 
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The Swift app.
+          - language: swift
+            build: swift
+          # The vendored C driver (Driver/vendor/BlackHole/BlackHole.c) plus the
+          # Stage 0 test sources, built the way the project actually builds them.
+          - language: c-cpp
+            build: driver
+
     steps:
+      # Actions are pinned to full commit SHAs: this job holds
+      # security-events: write, and a mutable tag could be repointed at any time.
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
-          languages: swift
+          languages: ${{ matrix.language }}
 
       - name: Build Audeon
+        if: matrix.build == 'swift'
         run: swift build
 
+      - name: Build driver
+        if: matrix.build == 'driver'
+        # build-driver.sh compiles BlackHole.c with the Audeon branding header
+        # force-included, which is exactly the configuration that ships. The
+        # runner is macos-14, so clang and the CoreAudio SDK are already present.
+        run: ./Driver/build-driver.sh
+
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@v4
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
-          category: "/language:swift"
+          category: "/language:${{ matrix.language }}"
+
+  # CodeQL ships no shell language pack, so the install/packaging scripts -- the
+  # ones that write into /Library/Audio/Plug-Ins/HAL as root -- would otherwise
+  # get no static analysis at all. shellcheck is preinstalled on macOS runners.
+  shellcheck:
+    name: Analyze (shell)
+    runs-on: macos-14
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Run shellcheck
+        run: |
+          set -euo pipefail
+          shellcheck Driver/*.sh scripts/*.sh
