@@ -202,6 +202,59 @@ final class HardwareIntegrationTests: XCTestCase {
                           "a full-scale discontinuity indicates a dropout or a spliced buffer")
     }
 
+    /// Per-app capture, against real process taps.
+    ///
+    /// This is the check that the tap actually *starts*. Construction and
+    /// starting were split apart so a replacement unit can be built while the
+    /// one it replaces keeps playing, and the compiler cannot tell you that the
+    /// start call was left out — the build stays clean while no audio ever
+    /// flows. Only a live unit proves the wiring.
+    func testAppTapStartsAndSurvivesAProcessSetChange() throws {
+        guard #available(macOS 14.2, *) else { throw XCTSkip("process taps need macOS 14.2") }
+        let outUID = try silentOutputUID()
+        let processes = Self.audioProcessObjects()
+        try XCTSkipUnless(processes.count >= 2, "need at least two audio processes to tap")
+
+        let redirect = AppRedirectEngine(deviceManager: manager)
+        defer { redirect.stopAll() }
+
+        func request(_ objects: [AudioObjectID]) -> AppTapRequest {
+            AppTapRequest(bundleID: "test.audeon.probe", processObjects: objects,
+                          outputUID: outUID, volume: 1.0, boost: 1.0,
+                          eqEnabled: false, eq: AudioEQ.flat, magicBoost: false)
+        }
+        func waitForUnit(_ expected: Bool, _ message: String) {
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline {
+                if redirect.hasLiveUnit(bundleID: "test.audeon.probe", outputUID: outUID) == expected { return }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            }
+            XCTFail(message)
+        }
+
+        redirect.apply([request([processes[0]])])
+        waitForUnit(true, "the tap is not running — construction succeeded but the engine never started")
+
+        // The app gains a second audio process. The unit is rebuilt, and the
+        // replacement is constructed before the outgoing one is stopped.
+        redirect.apply([request([processes[0], processes[1]])])
+        waitForUnit(true, "the tap did not survive a process-set change")
+    }
+
+    /// Audio process objects on this machine, for building a tap request.
+    private static func audioProcessObjects() -> [AudioObjectID] {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyProcessObjectList,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject),
+                                             &addr, 0, nil, &size) == noErr else { return [] }
+        var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
+                                         &addr, 0, nil, &size, &ids) == noErr else { return [] }
+        return ids
+    }
+
     /// A route between two real devices reports a live engine. Uses the default
     /// output only as a target for the aggregate; nothing is played to it.
     func testRouteToARealOutputStarts() throws {
