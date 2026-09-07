@@ -17,7 +17,12 @@ concurrency:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
-    runs-on: macos-14
+    # macos-15 (Xcode 16) rather than macos-14 (Xcode 15, Swift 5.10): the older
+    # image cannot build Swift 6 language mode, and its toolchain is two versions
+    # behind a typical developer machine, so syntax that compiles locally can fail
+    # here. The macOS floor is still enforced by Package.swift's .macOS(.v14)
+    # deployment target, not by the runner's OS.
+    runs-on: macos-15
     timeout-minutes: 30
     permissions:
       security-events: write
@@ -89,7 +94,12 @@ jobs:
   # reported as a failing test rather than a failed analysis build.
   test:
     name: Test (swift)
-    runs-on: macos-14
+    # macos-15 (Xcode 16) rather than macos-14 (Xcode 15, Swift 5.10): the older
+    # image cannot build Swift 6 language mode, and its toolchain is two versions
+    # behind a typical developer machine, so syntax that compiles locally can fail
+    # here. The macOS floor is still enforced by Package.swift's .macOS(.v14)
+    # deployment target, not by the runner's OS.
+    runs-on: macos-15
     timeout-minutes: 20
     permissions:
       contents: read
