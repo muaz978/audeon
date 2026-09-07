@@ -1,0 +1,34 @@
+# Drafts the next release's notes as pull requests merge, so a release is a
+# review-and-publish rather than an archaeology exercise over the commit log.
+name-template: 'Audeon $RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+
+categories:
+  - title: 'Fixes'
+    labels: [bug, reliability]
+  - title: 'Audio engine and driver'
+    labels: [audio-engine, driver, concurrency]
+  - title: 'Features'
+    labels: [enhancement]
+  - title: 'Tests and CI'
+    labels: [testing, ci]
+  - title: 'Documentation'
+    labels: [documentation]
+
+exclude-labels: [duplicate, invalid, wontfix]
+
+# Audeon is pre-1.0, so a breaking change moves the minor rather than the major.
+version-resolver:
+  minor:
+    labels: [enhancement]
+  patch:
+    labels: [bug, reliability, testing, ci, documentation, driver, audio-engine, concurrency]
+  default: patch
+
+change-template: '- $TITLE (#$NUMBER)'
+no-changes-template: '- No user-facing changes'
+
+template: |
+  $CHANGES
+
+  **Full changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION

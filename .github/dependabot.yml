@@ -1,0 +1,28 @@
+# Every action in this repository is pinned to a commit SHA, which stops a tag
+# being moved under us but also freezes us on that exact version. Pinning
+# without automated updates is worse than not pinning at all: security fixes
+# never arrive. Dependabot is what makes the pinning safe.
+#
+# Swift packages are deliberately not listed: Package.swift declares no external
+# dependencies, so there is nothing for Dependabot to watch.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - ci
+    commit-message:
+      prefix: "CI"
+    groups:
+      # One PR for routine bumps rather than five. Security updates still come
+      # through separately and immediately.
+      actions:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

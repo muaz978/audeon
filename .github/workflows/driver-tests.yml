@@ -1,0 +1,47 @@
+name: "Driver"
+
+# The driver's own test suite did not run anywhere in CI. The CodeQL c-cpp job
+# builds the driver, which proves it compiles, but Stage 0 is what actually
+# exercises it: 26 harness assertions against the plug-in's property and IO
+# interfaces, plus 7 that load the built bundle and check the device it
+# publishes. A driver that compiles and misbehaves would have passed unnoticed.
+on:
+  push:
+    branches: [ "main" ]
+    paths: [ 'Driver/**', '.github/workflows/driver-tests.yml' ]
+  pull_request:
+    branches: [ "main" ]
+    paths: [ 'Driver/**', '.github/workflows/driver-tests.yml' ]
+  workflow_dispatch:
+
+concurrency:
+  group: driver-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  stage0:
+    name: Stage 0
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Build the driver
+        run: ./Driver/build-driver.sh
+
+      - name: Run Stage 0
+        run: ./Driver/run-stage0.sh
+
+      # Kept so a failure can be inspected without reproducing the build.
+      - name: Upload the built driver
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: AudeonAudio.driver
+          path: Driver/build/**
+          if-no-files-found: ignore
+          retention-days: 7

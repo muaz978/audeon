@@ -1,0 +1,21 @@
+# GitHub Pages configuration. The site is the README rendered as a project page —
+# jekyll-readme-index (part of the github-pages gem) serves README.md as the
+# index, so the landing page and the repository front page cannot drift apart.
+title: Audeon
+description: A native macOS audio routing and monitoring app.
+theme: jekyll-theme-cayman
+
+# Everything that is source code rather than site content. Without this Jekyll
+# walks the whole tree and copies it into the published site.
+exclude:
+  - Sources/
+  - Tests/
+  - Driver/
+  - scripts/
+  - Icon/
+  - Resources/
+  - Package.swift
+  - Package.resolved
+  - .build/
+  - LICENSE
+  - SECURITY.md

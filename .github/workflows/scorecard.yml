@@ -1,0 +1,44 @@
+name: "Scorecard"
+
+# OSSF Scorecard audits supply-chain posture: pinned actions, branch
+# protection, token permissions, dangerous workflow patterns. Results are
+# uploaded to code scanning, so they appear beside the CodeQL findings rather
+# than in a separate place nobody looks.
+#
+# Only runs on the default branch. Scorecard reads repository settings, which a
+# pull request from a fork cannot see, so running it on PRs would report
+# misleading results.
+on:
+  branch_protection_rule:
+  schedule:
+    - cron: '41 4 * * 2'
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write   # upload the SARIF result
+      id-token: write          # publish the result so the badge can resolve
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: results.sarif
