@@ -10,14 +10,15 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
-permissions:
-  contents: read
-  pull-requests: write
+permissions: {}
 
 jobs:
   label:
     name: Label by path
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # the only thing this workflow writes
     # A fork's token is read-only, so the step would fail rather than label.
     # Skip it there instead of reporting a red check nobody can act on.
     if: github.event.pull_request.head.repo.full_name == github.repository
