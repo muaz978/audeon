@@ -1,6 +1,7 @@
 import Foundation
 import CoreAudio
 import Combine
+import os
 
 /// Direction of an audio endpoint.
 enum EndpointKind: String, Codable {
@@ -42,22 +43,33 @@ final class AudioDeviceManager: ObservableObject {
     @Published private(set) var outputs: [AudioEndpoint] = []
 
     // Cache: uid -> current AudioDeviceID, resolved fresh on every refresh.
+    //
+    // Guarded by `mapLock`, not confined to the main thread: the routing
+    // engines resolve uids from their own work queues so the HAL calls that
+    // follow stay off the main thread. Writes still only happen on the main
+    // thread, and the critical sections are single dictionary operations.
     private var deviceIDByUID: [String: AudioDeviceID] = [:]
+    private let mapLock = UnsafeMutablePointer<os_unfair_lock>.allocate(capacity: 1)
 
     private var listenerBlock: AudioObjectPropertyListenerBlock?
 
     init() {
+        mapLock.initialize(to: os_unfair_lock())
         refresh()
         installDeviceListChangeListener()
     }
 
     deinit {
         removeDeviceListChangeListener()
+        mapLock.deinitialize(count: 1)
+        mapLock.deallocate()
     }
 
     /// Resolve a stable UID to the live AudioDeviceID for engine wiring.
+    /// Safe to call from any thread.
     func deviceID(forUID uid: String) -> AudioDeviceID? {
-        deviceIDByUID[uid]
+        os_unfair_lock_lock(mapLock); defer { os_unfair_lock_unlock(mapLock) }
+        return deviceIDByUID[uid]
     }
 
     func endpoint(forUID uid: String) -> AudioEndpoint? {
@@ -85,14 +97,14 @@ final class AudioDeviceManager: ObservableObject {
     /// the system default. Restore paths must check this: a uid for an
     /// unplugged device, or a synthetic Output Group uid, silently no-ops.
     func isUsableOutput(_ uid: String) -> Bool {
-        deviceIDByUID[uid] != nil && !isVirtualSystemAudio(uid)
+        deviceID(forUID: uid) != nil && !isVirtualSystemAudio(uid)
     }
 
     /// The best available whole-system capture sink: the Audeon virtual device
     /// if its driver is installed, otherwise BlackHole if present, else nil.
     /// Driver-agnostic so the System Audio feature works either way.
     var systemAudioSinkUID: String? {
-        if deviceIDByUID[audeonVirtualDeviceUID] != nil { return audeonVirtualDeviceUID }
+        if deviceID(forUID: audeonVirtualDeviceUID) != nil { return audeonVirtualDeviceUID }
         if let bh = outputs.first(where: { $0.name.localizedCaseInsensitiveContains("blackhole") }) {
             return bh.uid
         }
@@ -134,7 +146,11 @@ final class AudioDeviceManager: ObservableObject {
             // device-list notification, so republishing unconditionally let a
             // route that could never start drive an endless
             // rebuild -> notify -> reconcile -> rebuild loop on the main thread.
-            if deviceIDByUID != newMap { deviceIDByUID = newMap }
+            os_unfair_lock_lock(mapLock)
+            let mapChanged = deviceIDByUID != newMap
+            if mapChanged { deviceIDByUID = newMap }
+            os_unfair_lock_unlock(mapLock)
+            if mapChanged { objectWillChange.send() }
             if inputs != sortedIn { inputs = sortedIn }
             if outputs != sortedOut { outputs = sortedOut }
         }
