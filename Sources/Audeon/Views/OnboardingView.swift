@@ -16,9 +16,18 @@ struct OnboardingView: View {
     private var captureAvailable: Bool {
         if #available(macOS 14.2, *) { return true } else { return false }
     }
-    private var blackHoleInstalled: Bool {
+    /// The sink's own name, so the copy names the driver the user actually has.
+    private var sinkName: String {
+        guard let uid = store.deviceManager.systemAudioSinkUID else { return "The capture driver" }
+        return store.deviceManager.endpoint(forUID: uid)?.name ?? "The capture driver"
+    }
+
+    /// True when *any* usable capture sink exists. Gating on a device literally
+    /// named "blackhole" told users of Audeon's own shipped driver to go and
+    /// install a third-party one, and hid the button that would have worked.
+    private var captureSinkInstalled: Bool {
         _ = recheck
-        return store.deviceManager.outputs.contains { $0.name.localizedCaseInsensitiveContains("blackhole") }
+        return store.deviceManager.systemAudioSinkUID != nil
     }
 
     var body: some View {
@@ -45,13 +54,13 @@ struct OnboardingView: View {
 
             permissionCard(
                 icon: "antenna.radiowaves.left.and.right", title: "Virtual Output for OBS", tag: "Optional",
-                detail: blackHoleInstalled
-                    ? "BlackHole is installed. Route apps to it and select it as a source in OBS, Discord, or Zoom."
-                    : "To send audio into OBS, Discord, or Zoom, install the free BlackHole driver, then route apps to it.",
-                enabled: blackHoleInstalled,
-                action: blackHoleInstalled ? nil : { open("https://existential.audio/blackhole/") },
+                detail: captureSinkInstalled
+                    ? "\(sinkName) is installed. Route apps to it and select it as a source in OBS, Discord, or Zoom."
+                    : "To send audio into OBS, Discord, or Zoom, install the Audeon driver or the free BlackHole driver, then route apps to it.",
+                enabled: captureSinkInstalled,
+                action: captureSinkInstalled ? nil : { open("https://existential.audio/blackhole/") },
                 actionTitle: "Get BlackHole",
-                secondaryAction: blackHoleInstalled ? { captureSystemAudio() } : nil,
+                secondaryAction: captureSinkInstalled ? { captureSystemAudio() } : nil,
                 secondaryActionTitle: "Capture System Audio")
 
             if captureMessage != nil {
@@ -104,8 +113,8 @@ struct OnboardingView: View {
     private func captureSystemAudio() {
         let ok = store.captureSystemAudio()
         captureMessage = ok
-            ? "Done. BlackHole is now your system output and appears in Audeon as \"System Audio\". Route it to your speakers or headphones in the main window."
-            : "Could not find BlackHole. Make sure it finished installing, then click Recheck."
+            ? "Done. \(sinkName) is now your system output and appears in Audeon as \"System Audio\". Route it to your speakers or headphones in the main window."
+            : "Could not find a capture driver. Make sure it finished installing, then click Recheck."
     }
 
     private func requestMic() {

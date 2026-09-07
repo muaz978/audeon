@@ -573,7 +573,7 @@ private struct OutputCard: View {
     /// below. A device nobody has ever selected in System Settings can sit
     /// silent here with nothing Audeon does making a difference.
     private var isHardwareSilent: Bool {
-        !output.isGroup && store.deviceManager.isEffectivelySilent(forUID: output.uid)
+        !output.isGroup && store.isHardwareSilent(uid: output.uid)
     }
     private var memberNames: String {
         (output.groupMembers ?? []).map { store.deviceName(forUID: $0) }.joined(separator: ", ")

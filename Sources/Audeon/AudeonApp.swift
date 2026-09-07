@@ -39,8 +39,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
     private var onboardingWindow: NSWindow?
+    private var settingsWindow: NSWindow?
+    private var fallbackMainWindow: NSWindow?
+
+    /// Settings used to exist only as a sheet on ContentView, so with the main
+    /// window closed the menu bar's gear set a flag with no presenter: the
+    /// button looked dead, and the sheet then ambushed the next window the user
+    /// opened. A window of its own works either way.
+    func showSettingsWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        if let existing = settingsWindow {
+            existing.makeKeyAndOrderFront(nil)
+            return
+        }
+        let host = NSHostingController(rootView: SettingsView().environmentObject(MixerStore.shared))
+        let window = NSWindow(contentViewController: host)
+        window.title = "Audeon Settings"
+        window.styleMask = [.titled, .closable]
+        window.isReleasedWhenClosed = false
+        window.center()
+        settingsWindow = window
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    /// Raise the main window, recreating one when the user has closed it.
+    /// A `WindowGroup` scene tears its window down on close and cannot be
+    /// reopened from outside the scene graph, which is why the popover's
+    /// button did nothing at all once that had happened.
+    func openMainWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        let existing = NSApp.windows.first {
+            $0.canBecomeMain && $0 !== settingsWindow && $0 !== onboardingWindow
+        }
+        if let existing {
+            existing.makeKeyAndOrderFront(nil)
+            return
+        }
+        if let fallbackMainWindow {
+            fallbackMainWindow.makeKeyAndOrderFront(nil)
+            return
+        }
+        let host = NSHostingController(rootView: ContentView().environmentObject(MixerStore.shared))
+        let window = NSWindow(contentViewController: host)
+        window.title = "Audeon"
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.isReleasedWhenClosed = false
+        window.setContentSize(NSSize(width: 980, height: 640))
+        window.center()
+        fallbackMainWindow = window
+        window.makeKeyAndOrderFront(nil)
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // The graph persist is debounced by 0.4 s and that pending write used
+        // to be dropped here, losing the last edits before Cmd-Q.
+        MixerStore.shared.flushPendingWrites()
         // Close any open recording files so they end with valid headers.
         MixerStore.shared.stopAllRecordings()
         // If the System Audio bridge is on, nothing will drain the virtual sink
@@ -92,9 +145,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ShowHideHotkey.shared.setEnabled(true)
         }
         if UserDefaults.standard.bool(forKey: "superVolumeKeys") {
-            // Silently skipped when Accessibility was revoked since last run;
-            // the Settings toggle reports that state when visited.
-            SuperVolumeKeys.shared.setEnabled(true)
+            // Silently skipped when Accessibility was revoked since last run.
+            // Clear the stored preference too: leaving it set made the Settings
+            // toggle read ON for a feature that was not running at all.
+            if !SuperVolumeKeys.shared.setEnabled(true) {
+                UserDefaults.standard.set(false, forKey: "superVolumeKeys")
+            }
         }
 
         requestPermissionsOnFirstLaunch()
@@ -107,8 +163,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             AVCaptureDevice.requestAccess(for: .audio) { _ in }
         }
         guard !UserDefaults.standard.bool(forKey: "didWelcome") else { return }
-        UserDefaults.standard.set(true, forKey: "didWelcome")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.showOnboarding() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            // Recorded only once the window is actually up. Writing it first
+            // meant a quit or crash inside this delay suppressed the first-run
+            // welcome permanently.
+            UserDefaults.standard.set(true, forKey: "didWelcome")
+            self?.showOnboarding()
+        }
     }
 
     private func showOnboarding() {
@@ -182,10 +243,11 @@ private struct QuickControlsView: View {
                                           : "arrow.down.right.and.arrow.up.left")
             }.buttonStyle(.borderless).help(compact ? "Expand" : "Compact")
             Button {
-                NSApp.activate(ignoringOtherApps: true)
-                for w in NSApp.windows where w.canBecomeMain { w.makeKeyAndOrderFront(nil); break }
+                (NSApp.delegate as? AppDelegate)?.openMainWindow()
             } label: { Image(systemName: "macwindow") }.buttonStyle(.borderless).help("Open main window")
-            Button { MixerStore.shared.showSettings = true; NSApp.activate(ignoringOtherApps: true) } label: {
+            Button {
+                (NSApp.delegate as? AppDelegate)?.showSettingsWindow()
+            } label: {
                 Image(systemName: "gearshape")
             }.buttonStyle(.borderless).help("Settings")
         }
@@ -507,14 +569,24 @@ private struct QuickControlsView: View {
     }
 
     private func muteButton(uid: String, scope: EndpointKind) -> some View {
+        // nil means the device exposes no software volume at all (HDMI, many
+        // USB DACs, aggregates) — not that it is muted. Collapsing that into 0
+        // painted those rows permanently red at 0%.
+        let hasControl = store.deviceManager.hasVolumeControl(
+            forUID: uid,
+            scope: scope == .input ? kAudioObjectPropertyScopeInput : kAudioObjectPropertyScopeOutput)
         let current = scope == .input ? store.deviceManager.inputVolume(forUID: uid)
                                       : store.deviceManager.outputVolume(forUID: uid)
-        let isMuted = (current ?? 0) <= 0.0001
+        let isMuted = hasControl && (current ?? 0) <= 0.0001
         return Button {
+            // Both branches write muteMemory. The volume setters publish
+            // nothing, so without a @State write here the unmute direction left
+            // the row showing muted until some unrelated change republished.
             if isMuted {
                 let restore = muteMemory[uid] ?? 0.5
                 if scope == .input { store.deviceManager.setInputVolume(restore, forUID: uid) }
                 else { store.deviceManager.setOutputVolume(restore, forUID: uid) }
+                muteMemory[uid] = nil
             } else {
                 muteMemory[uid] = current
                 if scope == .input { store.deviceManager.setInputVolume(0, forUID: uid) }
@@ -523,7 +595,10 @@ private struct QuickControlsView: View {
         } label: {
             Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
                 .foregroundStyle(isMuted ? .red : .primary)
-        }.buttonStyle(.borderless)
+        }
+        .buttonStyle(.borderless)
+        .disabled(!hasControl)
+        .help(hasControl ? (isMuted ? "Unmute" : "Mute") : "This device has no software volume control")
     }
 
     private func cycleBoost(_ source: InputSource) {
