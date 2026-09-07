@@ -84,3 +84,24 @@ jobs:
         run: |
           set -euo pipefail
           shellcheck Driver/*.sh scripts/*.sh
+
+  # The Swift test suite. Kept separate from the CodeQL job so a failing test is
+  # reported as a failing test rather than a failed analysis build.
+  test:
+    name: Test (swift)
+    runs-on: macos-14
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # Printed so a toolchain mismatch is diagnosable straight from the log:
+      # the runner's Swift can be older than a local one, and syntax that
+      # compiles on a developer machine may not compile here.
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Run tests
+        run: swift test
