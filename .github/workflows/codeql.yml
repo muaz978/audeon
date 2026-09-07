@@ -10,6 +10,12 @@ on:
     - cron: '23 3 * * 1'
   workflow_dispatch:
 
+# Deny by default at the top level, then grant only what each job needs. Without
+# this, a job that forgets to declare permissions inherits the repository
+# default rather than nothing, which is how a workflow quietly ends up with a
+# writable token it never asked for.
+permissions: {}
+
 concurrency:
   group: codeql-${{ github.ref }}-${{ github.workflow }}
   cancel-in-progress: true
