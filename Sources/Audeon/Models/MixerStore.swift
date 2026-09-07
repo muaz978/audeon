@@ -645,6 +645,7 @@ final class MixerStore: ObservableObject {
             formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
             let filename = "\(title(for: source)) \(formatter.string(from: Date())).caf"
             let recorder = MixRecorder(url: Self.recordingsFolder.appendingPathComponent(filename))
+            recorder.start()
             recorders[sourceID] = recorder
             recordingSourceIDs.insert(sourceID)
             attachRecorders()
@@ -667,6 +668,18 @@ final class MixerStore: ObservableObject {
     /// source. Runs after every reconciliation, because engines are rebuilt
     /// there; the recorder object survives and keeps appending to one file.
     private func attachRecorders() {
+        // A source removed, or replaced by loading a scene, while it was
+        // recording used to leave its recorder mounted on an engine that no
+        // longer exists: the file stopped growing with no indication, the id
+        // stuck in recordingSourceIDs forever, and the user could start a
+        // second recording they had no way to stop.
+        let live = Set(inputs.map(\.id))
+        for (id, recorder) in recorders where !live.contains(id) {
+            recorder.finish()
+            recorders[id] = nil
+            recordingSourceIDs.remove(id)
+        }
+
         for source in inputs {
             let recorder = recorders[source.id]   // nil detaches
             switch source.kind {
@@ -675,8 +688,15 @@ final class MixerStore: ObservableObject {
                 if source.followsSystemOutput {
                     routeID = source.id
                 } else if let conn = connections.first(where: { $0.sourceID == source.id }) {
-                    if let out = outputs.first(where: { $0.id == conn.outputID }), out.isGroup {
-                        routeID = Self.derivedRouteID(from: conn.id, index: 0)
+                    if let out = outputs.first(where: { $0.id == conn.outputID }),
+                       let members = out.groupMembers {
+                        // Mount on the first member that actually has a live
+                        // engine. Always taking member 0 silently dropped the
+                        // whole recording whenever that member was unplugged,
+                        // even though the group was still playing elsewhere.
+                        routeID = members.indices
+                            .map { Self.derivedRouteID(from: conn.id, index: $0) }
+                            .first { router.hasEngine(routeID: $0) }
                     } else {
                         routeID = conn.id
                     }
@@ -690,7 +710,7 @@ final class MixerStore: ObservableObject {
                     outputUID = systemAudio.defaultOutputUID
                 } else if let conn = connections.first(where: { $0.sourceID == source.id }),
                           let out = outputs.first(where: { $0.id == conn.outputID }) {
-                    outputUID = out.isGroup ? out.groupMembers?.first : out.uid
+                    outputUID = out.groupMembers?.first ?? out.uid
                 } else {
                     outputUID = nil
                 }

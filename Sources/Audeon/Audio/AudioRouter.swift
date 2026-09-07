@@ -97,7 +97,14 @@ final class AudioRouter: ObservableObject {
     /// Attach or detach a recorder on a live route's engine.
     func setRecorder(routeID: UUID, _ recorder: MixRecorder?) {
         lock.lock(); defer { lock.unlock() }
-        engines[routeID]?.recorderSlot.recorder = recorder
+        engines[routeID]?.recorderSlot.set(recorder)
+    }
+
+    /// True when a live engine currently carries this route id. Recording
+    /// mounts use it to pick a group member that is actually running.
+    func hasEngine(routeID: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return engines[routeID] != nil
     }
 
     func stopAll() {
@@ -228,7 +235,7 @@ private final class SameDeviceRouteEngine: AnyRouteEngine {
         let slot = self.recorderSlot
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024,
                                         format: engine.mainMixerNode.outputFormat(forBus: 0)) { buffer, _ in
-            slot.recorder?.append(buffer)
+            slot.acquire()?.append(buffer)
             guard throttle.shouldFire() else { return }
             onLevel(AudioMeter.reading(for: buffer))
         }
@@ -485,26 +492,22 @@ private final class CrossDeviceRouteEngine: AnyRouteEngine {
             }
         }
 
-        if let recorder = slot.recorder, !inChannels.isEmpty {
+        if let recorder = slot.acquire(), !inChannels.isEmpty {
             // Only taken while actually recording, so the steady-state path
-            // stays copy-free. Records exactly what is sent to the output.
+            // stays copy-free. Records exactly what is sent to the output, and
+            // pushes straight from the source pointers: the realtime thread
+            // builds no Swift array and touches no file.
             if let processed {
-                let frames = processedFrames
-                var left = [Float](repeating: 0, count: frames)
-                var right = [Float](repeating: 0, count: frames)
-                for f in 0..<frames { left[f] = processed.left[f]; right[f] = processed.right[f] }
-                recorder.append(deinterleaved: [left, right], sampleRate: sampleRate)
+                recorder.push(frames: processedFrames, sampleRate: sampleRate, gain: 1,
+                              left: processed.left, leftStride: 1,
+                              right: processed.right, rightStride: 1)
             } else {
-                let frames = inChannels[0].frames
-                let chCount = min(inChannels.count, 2)
-                var copies: [[Float]] = []
-                for c in 0..<chCount {
-                    let src = inChannels[c]
-                    var channel = [Float](repeating: 0, count: frames)
-                    for f in 0..<min(frames, src.frames) { channel[f] = src.base[f * src.stride] * gain }
-                    copies.append(channel)
-                }
-                recorder.append(deinterleaved: copies, sampleRate: sampleRate)
+                let l = inChannels[0]
+                let r = inChannels.count > 1 ? inChannels[1] : nil
+                recorder.push(frames: min(l.frames, r?.frames ?? l.frames),
+                              sampleRate: sampleRate, gain: gain,
+                              left: l.base, leftStride: l.stride,
+                              right: r?.base, rightStride: r?.stride ?? 1)
             }
         }
 
