@@ -1,0 +1,27 @@
+name: "Labeler"
+
+# Labels pull requests from the paths they touch.
+#
+# Uses `pull_request`, not `pull_request_target`. The latter would also label
+# fork pull requests, but it runs with a writable token in the context of the
+# base repository, which is the pattern behind most Actions privilege-escalation
+# incidents. A label is not worth that. Fork pull requests simply go unlabelled.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  label:
+    name: Label by path
+    runs-on: ubuntu-latest
+    # A fork's token is read-only, so the step would fail rather than label.
+    # Skip it there instead of reporting a red check nobody can act on.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7
+        with:
+          sync-labels: false   # never remove a label someone applied by hand

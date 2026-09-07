@@ -1,0 +1,27 @@
+# Path-to-label mapping for pull requests, using the labels the repository
+# already uses rather than inventing a parallel taxonomy.
+driver:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'Driver/**'
+
+audio-engine:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'Sources/Audeon/Audio/**'
+
+testing:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'Tests/**'
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**'
+          - 'scripts/**'
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
