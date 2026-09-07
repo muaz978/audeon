@@ -18,18 +18,23 @@ clang -o build/bundle_load Tests/bundle_load.c \
     -framework CoreAudio -framework CoreFoundation \
     -O1 -g
 
+# Both tests always run and the summary is always printed. Under `set -e` a bare
+# `./build/harness` would abort the script the moment the harness failed, so the
+# bundle load test never ran and the summary below was dead code. `|| STATUS=$?`
+# keeps the failure from tripping errexit while still recording the exit code.
 echo ""
 echo ">> running in-process harness"
-./build/harness
-HARNESS=$?
+HARNESS=0
+./build/harness || HARNESS=$?
 
 echo ""
 echo ">> running bundle load test"
-./build/bundle_load build/AudeonAudio.driver
-BUNDLE=$?
+BUNDLE=0
+./build/bundle_load build/AudeonAudio.driver || BUNDLE=$?
 
 echo ""
-if [ $HARNESS -eq 0 ] && [ $BUNDLE -eq 0 ]; then
+echo ">> harness exit: $HARNESS   bundle load exit: $BUNDLE"
+if [ "$HARNESS" -eq 0 ] && [ "$BUNDLE" -eq 0 ]; then
     echo "== STAGE 0: ALL GREEN =="
 else
     echo "== STAGE 0: FAILURES PRESENT =="

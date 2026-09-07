@@ -23,13 +23,53 @@ if [ ! -d "$SRC" ]; then
     exit 1
 fi
 
-echo ">> installing $SRC -> $DST"
-mkdir -p "$DST_DIR"
-rm -rf "$DST"
-cp -R "$SRC" "$DST"
+# Stage the new bundle beside the destination, validate it there, and only then
+# swap it in. Deleting the working driver before the copy succeeds would leave
+# the machine with no audio device if anything failed part way through.
+NEW="$DST_DIR/.AudeonAudio.driver.new.$$"
+OLD="$DST_DIR/.AudeonAudio.driver.old.$$"
 
-# The HAL folder wants root ownership.
-chown -R root:wheel "$DST"
+cleanup() {
+    rm -rf "$NEW"
+}
+trap cleanup EXIT
+
+echo ">> staging $SRC -> $NEW"
+mkdir -p "$DST_DIR"
+rm -rf "$NEW"
+cp -R "$SRC" "$NEW"
+
+# The HAL folder wants root ownership, and coreaudiod loads this as root: no one
+# else may be able to write to it.
+chown -R root:wheel "$NEW"
+chmod -R go-w "$NEW"
+
+echo ">> validating staged bundle"
+if [ ! -x "$NEW/Contents/MacOS/AudeonDriver" ]; then
+    echo "Staged bundle has no executable at Contents/MacOS/AudeonDriver. Aborting."
+    exit 1
+fi
+if [ ! -f "$NEW/Contents/Info.plist" ]; then
+    echo "Staged bundle has no Contents/Info.plist. Aborting."
+    exit 1
+fi
+if ! codesign --verify --strict "$NEW" 2>/dev/null; then
+    echo "Staged bundle failed signature verification. Aborting; nothing was changed."
+    exit 1
+fi
+
+echo ">> installing -> $DST"
+if [ -e "$DST" ]; then
+    mv "$DST" "$OLD"
+fi
+if ! mv "$NEW" "$DST"; then
+    echo "Install failed. Restoring the previous driver."
+    if [ -e "$OLD" ]; then
+        mv "$OLD" "$DST"
+    fi
+    exit 1
+fi
+rm -rf "$OLD"
 
 echo ">> restarting coreaudiod (system audio will blip for a second)"
 killall coreaudiod 2>/dev/null || true

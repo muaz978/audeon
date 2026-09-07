@@ -161,6 +161,14 @@ struct ObjectInfo {
 #define                             kPlugIn_Icon                        "BlackHole.icns"
 #endif
 
+#ifndef kBox_Name
+#define                             kBox_Name                           kDriver_Name " Box"
+#endif
+
+#ifndef kBox_ModelName
+#define                             kBox_ModelName                      kDriver_Name
+#endif
+
 #ifndef kHas_Driver_Name_Format
 #define                             kHas_Driver_Name_Format             true
 #endif
@@ -558,6 +566,32 @@ static UInt32 device_stream_list_size(AudioObjectPropertyScope scope, AudioObjec
 
 }
 
+//  The single definition of "does this object belong in the control list for this
+//  scope". Both the counting code below and the code that fills the list out in
+//  BlackHole_GetDevicePropertyData() go through here, so the size the HAL is told
+//  to allocate and the number of IDs actually written can never disagree.
+static bool is_listed_control(const struct ObjectInfo* info, AudioObjectPropertyScope scope) {
+
+    if (info->type != kObjectType_Control)
+    {
+        return false;
+    }
+
+    //  A global request matches every scope; anything else has to match exactly.
+    if ((info->scope != scope) && (scope != kAudioObjectPropertyScopeGlobal))
+    {
+        return false;
+    }
+
+    //  The pitch adjust control is only published while it is enabled.
+    if ((info->id == kObjectID_Pitch_Adjust) && !gPitch_Adjust_Enabled)
+    {
+        return false;
+    }
+
+    return true;
+}
+
 static UInt32 device_control_list_size(AudioObjectPropertyScope scope, AudioObjectID objectID) {
     
     switch (objectID) {
@@ -567,7 +601,7 @@ static UInt32 device_control_list_size(AudioObjectPropertyScope scope, AudioObje
             UInt32 count = 0;
             for (UInt32 i = 0; i < kDevice_ObjectListSize; i++)
             {
-                count += (kDevice_ObjectList[i].type == kObjectType_Control && (kDevice_ObjectList[i].scope == scope || scope == kAudioObjectPropertyScopeGlobal));
+                count += is_listed_control(&kDevice_ObjectList[i], scope);
             }
 
             return count;
@@ -579,7 +613,7 @@ static UInt32 device_control_list_size(AudioObjectPropertyScope scope, AudioObje
             UInt32 count = 0;
             for (UInt32 i = 0; i < kDevice2_ObjectListSize; i++)
             {
-                count += (kDevice2_ObjectList[i].type == kObjectType_Control && (kDevice2_ObjectList[i].scope == scope || scope == kAudioObjectPropertyScopeGlobal));
+                count += is_listed_control(&kDevice2_ObjectList[i], scope);
             }
 
             return count;
@@ -763,8 +797,11 @@ static OSStatus	BlackHole_Initialize(AudioServerPlugInDriverRef inDriver, AudioS
 		CFRelease(theSettingsData);
 	}
 	
-	//	initialize the box name from the settings
-	gPlugIn_Host->CopyFromStorage(gPlugIn_Host, CFSTR("box acquired"), &theSettingsData);
+	//	initialize the box name from the settings. This is a separate key from
+	//	"box acquired": reading the name out of the acquired slot only ever found a
+	//	boolean, so a saved name was never restored.
+	theSettingsData = NULL;
+	gPlugIn_Host->CopyFromStorage(gPlugIn_Host, CFSTR("box name"), &theSettingsData);
 	if(theSettingsData != NULL)
 	{
 		if(CFGetTypeID(theSettingsData) == CFStringGetTypeID())
@@ -778,7 +815,7 @@ static OSStatus	BlackHole_Initialize(AudioServerPlugInDriverRef inDriver, AudioS
 	//	set the box name directly as a last resort
 	if(gBox_Name == NULL)
 	{
-		gBox_Name = CFSTR("BlackHole Box");
+		gBox_Name = CFSTR(kBox_Name);
 	}
 	
 	//	calculate the host ticks per frame
@@ -1501,7 +1538,7 @@ static OSStatus	BlackHole_GetPlugInPropertyData(AudioServerPlugInDriverRef inDri
 			//	qualifier doesn't match any devices. In such case, kAudioObjectUnknown is
 			//	the object ID to return.
 			FailWithAction(inDataSize < sizeof(AudioObjectID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetPlugInPropertyData: not enough space for the return value of kAudioPlugInPropertyTranslateUIDToBox");
-			FailWithAction(inQualifierDataSize == sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetPlugInPropertyData: the qualifier is the wrong size for kAudioPlugInPropertyTranslateUIDToBox");
+			FailWithAction(inQualifierDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetPlugInPropertyData: the qualifier is the wrong size for kAudioPlugInPropertyTranslateUIDToBox");
 			FailWithAction(inQualifierData == NULL, theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetPlugInPropertyData: no qualifier for kAudioPlugInPropertyTranslateUIDToBox");
 
 			CFStringRef boxUID = get_box_uid();
@@ -1565,7 +1602,7 @@ static OSStatus	BlackHole_GetPlugInPropertyData(AudioServerPlugInDriverRef inDri
 			//	qualifier doesn't match any devices. In such case, kAudioObjectUnknown is
 			//	the object ID to return.
 			FailWithAction(inDataSize < sizeof(AudioObjectID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetPlugInPropertyData: not enough space for the return value of kAudioPlugInPropertyTranslateUIDToDevice");
-			FailWithAction(inQualifierDataSize == sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetPlugInPropertyData: the qualifier is the wrong size for kAudioPlugInPropertyTranslateUIDToDevice");
+			FailWithAction(inQualifierDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetPlugInPropertyData: the qualifier is the wrong size for kAudioPlugInPropertyTranslateUIDToDevice");
 			FailWithAction(inQualifierData == NULL, theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetPlugInPropertyData: no qualifier for kAudioPlugInPropertyTranslateUIDToDevice");
             
             
@@ -1910,14 +1947,14 @@ static OSStatus	BlackHole_GetBoxPropertyData(AudioServerPlugInDriverRef inDriver
 		case kAudioObjectPropertyModelName:
 			//	This is the human readable name of the maker of the box.
 			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetBoxPropertyData: not enough space for the return value of kAudioObjectPropertyManufacturer for the box");
-			*((CFStringRef*)outData) = CFSTR("BlackHole");
+			*((CFStringRef*)outData) = CFSTR(kBox_ModelName);
 			*outDataSize = sizeof(CFStringRef);
 			break;
 			
 		case kAudioObjectPropertyManufacturer:
 			//	This is the human readable name of the maker of the box.
 			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetBoxPropertyData: not enough space for the return value of kAudioObjectPropertyManufacturer for the box");
-			*((CFStringRef*)outData) = CFSTR("Existential Audio Inc.");
+			*((CFStringRef*)outData) = CFSTR(kManufacturer_Name);
 			*outDataSize = sizeof(CFStringRef);
 			break;
 			
@@ -2088,6 +2125,15 @@ static OSStatus	BlackHole_SetBoxPropertyData(AudioServerPlugInDriverRef inDriver
 				}
 				gBox_Name = *theNewName;
 				pthread_mutex_unlock(&gPlugIn_StateMutex);
+				//	persist the new name so it survives a restart of the driver
+				if((theNewName != NULL) && (*theNewName != NULL))
+				{
+					gPlugIn_Host->WriteToStorage(gPlugIn_Host, CFSTR("box name"), *theNewName);
+				}
+				else
+				{
+					gPlugIn_Host->DeleteFromStorage(gPlugIn_Host, CFSTR("box name"));
+				}
 				*outNumberPropertiesChanged = 1;
 				outChangedAddresses[0].mSelector = kAudioObjectPropertyName;
 				outChangedAddresses[0].mScope = kAudioObjectPropertyScopeGlobal;
@@ -2700,29 +2746,42 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 
             theNumberItemsToFetch = minimum(inDataSize / sizeof(AudioObjectID), device_control_list_size(inAddress->mScope, inObjectID));
 
-            //    fill out the list with as many objects as requested
+            //    fill out the list with as many objects as requested. The loops are bounded
+            //    by the object list as well as by the fetch count, and they use the same
+            //    predicate as device_control_list_size() above, so they can neither walk off
+            //    the end of the array nor write an object the count did not account for.
             switch (inObjectID) {
                 case kObjectID_Device:
+                {
+                    UInt32 k = 0;
                     pthread_mutex_lock(&gPlugIn_StateMutex);
-                    for (UInt32 i = 0, k = 0; k < theNumberItemsToFetch; i++)
+                    for (UInt32 i = 0; (i < kDevice_ObjectListSize) && (k < theNumberItemsToFetch); i++)
                     {
-                        // TODO remove hack! There must be a better way than looking for a fixed i
-                        if ((kDevice_ObjectList[i].type == kObjectType_Control) && !(!gPitch_Adjust_Enabled && kDevice_ObjectList[i].id==kObjectID_Pitch_Adjust))
+                        if (is_listed_control(&kDevice_ObjectList[i], inAddress->mScope))
                         {
                             ((AudioObjectID*)outData)[k++] = kDevice_ObjectList[i].id;
                         }
                     }
                     pthread_mutex_unlock(&gPlugIn_StateMutex);
+
+                    //    report what we actually wrote, not what was asked for
+                    theNumberItemsToFetch = k;
+                }
                     break;
 
                 case kObjectID_Device2:
-                    for (UInt32 i = 0, k = 0; k < theNumberItemsToFetch; i++)
+                {
+                    UInt32 k = 0;
+                    for (UInt32 i = 0; (i < kDevice2_ObjectListSize) && (k < theNumberItemsToFetch); i++)
                     {
-                        if ((kDevice_ObjectList[i].type == kObjectType_Control) && !(!gPitch_Adjust_Enabled && kDevice_ObjectList[i].id==kObjectID_Pitch_Adjust))
+                        if (is_listed_control(&kDevice2_ObjectList[i], inAddress->mScope))
                         {
                             ((AudioObjectID*)outData)[k++] = kDevice2_ObjectList[i].id;
                         }
                     }
+
+                    theNumberItemsToFetch = k;
+                }
                     break;
             }
 
@@ -4338,6 +4397,16 @@ static OSStatus	BlackHole_StartIO(AudioServerPlugInDriverRef inDriver, AudioObje
         gDevice_AnchorHostTime = mach_absolute_time();
         gDevice_PreviousTicks = 0;
         gRingBuffer = calloc(kRing_Buffer_Frame_Size * kNumber_Of_Channels, sizeof(Float32));
+
+        if (gRingBuffer == NULL)
+        {
+            //  There is nowhere to move audio without the ring buffer, so undo the start
+            //  we just counted and fail rather than leaving the IO thread to run against
+            //  a NULL buffer.
+            if (inDeviceObjectID == kObjectID_Device) { gDevice_IOIsRunning -= 1; }
+            if (inDeviceObjectID == kObjectID_Device2) { gDevice2_IOIsRunning -= 1; }
+            theAnswer = kAudioHardwareUnspecifiedError;
+        }
     }
     
     
@@ -4527,6 +4596,12 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
 	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_DoIOOperation: bad device ID");
 	FailWithAction((inStreamObjectID != kObjectID_Stream_Input) && (inStreamObjectID != kObjectID_Stream_Output), theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_DoIOOperation: bad stream ID");
 
+    // Take one snapshot of the ring buffer. This is the real-time IO thread, so it cannot
+    // take the state lock, and StopIO can release the buffer between cycles. A NULL buffer
+    // means there is nothing to move: the read side vends silence and the write side drops
+    // the mix, rather than faulting.
+    Float32* theRingBuffer = gRingBuffer;
+
     // Calculate the ring buffer offsets and splits.
     UInt64 mSampleTime = inOperationID == kAudioServerPlugInIOOperationReadInput ? inIOCycleInfo->mInputTime.mSampleTime : inIOCycleInfo->mOutputTime.mSampleTime;
     UInt32 ringBufferFrameLocationStart = mSampleTime % kRing_Buffer_Frame_Size;
@@ -4550,23 +4625,23 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
     if(inOperationID == kAudioServerPlugInIOOperationReadInput)
     {
         // If mute is one let's just fill the buffer with zeros or if there's no apps outputting audio
-        if (gMute_Master_Value || lastOutputSampleTime - inIOBufferFrameSize < inIOCycleInfo->mInputTime.mSampleTime)
+        if (theRingBuffer == NULL || gMute_Master_Value || lastOutputSampleTime - inIOBufferFrameSize < inIOCycleInfo->mInputTime.mSampleTime)
         {
             // Clear the ioMainBuffer
             vDSP_vclr(ioMainBuffer, 1, inIOBufferFrameSize * kNumber_Of_Channels);
             
             // Clear the ring buffer.
-            if (!isBufferClear)
+            if ((theRingBuffer != NULL) && !isBufferClear)
             {
-                vDSP_vclr(gRingBuffer, 1, kRing_Buffer_Frame_Size * kNumber_Of_Channels);
+                vDSP_vclr(theRingBuffer, 1, kRing_Buffer_Frame_Size * kNumber_Of_Channels);
                 isBufferClear = true;
             }
         }
         else
         {
             // Copy the buffers.
-            memcpy(ioMainBuffer, gRingBuffer + ringBufferFrameLocationStart * kNumber_Of_Channels, firstPartFrameSize * kNumber_Of_Channels * sizeof(Float32));
-            memcpy((Float32*)ioMainBuffer + firstPartFrameSize * kNumber_Of_Channels, gRingBuffer, secondPartFrameSize * kNumber_Of_Channels * sizeof(Float32));
+            memcpy(ioMainBuffer, theRingBuffer + ringBufferFrameLocationStart * kNumber_Of_Channels, firstPartFrameSize * kNumber_Of_Channels * sizeof(Float32));
+            memcpy((Float32*)ioMainBuffer + firstPartFrameSize * kNumber_Of_Channels, theRingBuffer, secondPartFrameSize * kNumber_Of_Channels * sizeof(Float32));
             
             // Finally we'll apply the output volume to the buffer.
 	    if(kEnableVolumeControl)
@@ -4591,12 +4666,15 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
         // Issue with outputting from mirrored device and main device at the same time. Not currently mixing. 
         
         // Copy the buffers.
-        memcpy(gRingBuffer + ringBufferFrameLocationStart * kNumber_Of_Channels, ioMainBuffer, firstPartFrameSize * kNumber_Of_Channels * sizeof(Float32));
-        memcpy(gRingBuffer, (Float32*)ioMainBuffer + firstPartFrameSize * kNumber_Of_Channels, secondPartFrameSize * kNumber_Of_Channels * sizeof(Float32));
-        
-        // Save the last output time.
-        lastOutputSampleTime = inIOCycleInfo->mOutputTime.mSampleTime + inIOBufferFrameSize;
-        isBufferClear = false;
+        if (theRingBuffer != NULL)
+        {
+            memcpy(theRingBuffer + ringBufferFrameLocationStart * kNumber_Of_Channels, ioMainBuffer, firstPartFrameSize * kNumber_Of_Channels * sizeof(Float32));
+            memcpy(theRingBuffer, (Float32*)ioMainBuffer + firstPartFrameSize * kNumber_Of_Channels, secondPartFrameSize * kNumber_Of_Channels * sizeof(Float32));
+            
+            // Save the last output time.
+            lastOutputSampleTime = inIOCycleInfo->mOutputTime.mSampleTime + inIOBufferFrameSize;
+            isBufferClear = false;
+        }
     }
 
 Done:

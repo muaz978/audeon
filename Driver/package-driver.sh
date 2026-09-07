@@ -22,6 +22,10 @@ mkdir -p "$STAGE"
 
 cp -R build/AudeonAudio.driver "$STAGE/AudeonAudio.driver"
 
+# The driver is built from the vendored BlackHole source (GPL-3.0). Shipping the
+# object code means shipping the licence text with it.
+cp vendor/BlackHole/LICENSE "$STAGE/LICENSE"
+
 cat > "$STAGE/install.sh" <<'INSTALL'
 #!/bin/bash
 # Installs the Audeon virtual audio driver so this Mac gains an "Audeon Stream"
@@ -47,14 +51,55 @@ if [ ! -d "$SRC" ]; then
     exit 1
 fi
 
-echo ">> clearing download quarantine"
-xattr -dr com.apple.quarantine "$SRC" 2>/dev/null || true
+# The bundle sitting next to this script came out of a zip in the user's Downloads
+# folder: it is writable by whoever unpacked it, and coreaudiod will load it as
+# root. So verify the signature first, then stage a root-owned copy, and only
+# clear quarantine on that staged copy - never on the downloaded tree itself.
+echo ">> verifying signature of $SRC"
+if ! codesign --verify --strict "$SRC"; then
+    echo "The driver bundle failed signature verification. Refusing to install it."
+    echo "Re-download the package; do not install a bundle that will not verify."
+    exit 1
+fi
+
+NEW="$DST_DIR/.AudeonAudio.driver.new.$$"
+OLD="$DST_DIR/.AudeonAudio.driver.old.$$"
+
+cleanup() {
+    rm -rf "$NEW"
+}
+trap cleanup EXIT
+
+echo ">> staging -> $NEW"
+mkdir -p "$DST_DIR"
+rm -rf "$NEW"
+cp -R "$SRC" "$NEW"
+
+# Root-owned and not writable by anyone else, before it is ever loaded.
+chown -R root:wheel "$NEW"
+chmod -R go-w "$NEW"
+
+echo ">> clearing download quarantine on the staged copy"
+xattr -dr com.apple.quarantine "$NEW" 2>/dev/null || true
+
+# Re-verify after the ownership, permission and xattr changes.
+if ! codesign --verify --strict "$NEW"; then
+    echo "The staged driver no longer verifies. Aborting; nothing was changed."
+    exit 1
+fi
 
 echo ">> installing -> $DST"
-mkdir -p "$DST_DIR"
-rm -rf "$DST"
-cp -R "$SRC" "$DST"
-chown -R root:wheel "$DST"
+if [ -e "$DST" ]; then
+    mv "$DST" "$OLD"
+fi
+if ! mv "$NEW" "$DST"; then
+    echo "Install failed. Restoring the previous driver."
+    if [ -e "$OLD" ]; then
+        mv "$OLD" "$DST"
+    fi
+    exit 1
+fi
+rm -rf "$OLD"
 
 echo ">> restarting coreaudiod (system audio blips for a second)"
 killall coreaudiod 2>/dev/null || true
@@ -124,8 +169,8 @@ supported alternative is the free, notarized BlackHole driver
 system audio capture exactly the same way.
 
 The driver is GPL-3.0 (it builds on the BlackHole source by Existential Audio
-Inc.). Full source is at https://github.com/muaz978/audeon in the Driver
-folder.
+Inc.). The full licence text is in the LICENSE file next to this README, and the
+full source is at https://github.com/muaz978/audeon in the Driver folder.
 READ
 
 # Strip Finder cruft, then a clean zip with no AppleDouble/__MACOSX noise.

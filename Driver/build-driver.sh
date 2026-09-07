@@ -31,6 +31,16 @@ clang -bundle \
 
 cp Info.plist "$BUNDLE/Contents/Info.plist"
 
+# The driver advertises kPlugIn_Icon ("Audeon.icns" per AudeonDriverConfig.h) and
+# resolves it with CFBundleCopyResourceURL, so kAudioDevicePropertyIcon fails
+# unless the icon is actually in Contents/Resources.
+ICON="../Icon/Audeon.icns"
+if [ ! -f "$ICON" ]; then
+    echo "!! missing $ICON - the driver advertises Audeon.icns and would vend no icon"
+    exit 1
+fi
+cp "$ICON" "$BUNDLE/Contents/Resources/Audeon.icns"
+
 # Ad-hoc signature so the bundle has a stable identity. A real distribution
 # to other machines will need Developer ID signing and notarization.
 codesign --force --sign - "$BUNDLE" >/dev/null
