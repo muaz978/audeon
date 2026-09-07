@@ -28,6 +28,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
+      # Requires Pages to be enabled once with GitHub Actions as the source
+      # (Settings > Pages > Source). This step fails with "Get Pages site
+      # failed" until that is done, which is what a fork of this repository
+      # will hit first.
       - name: Configure Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
 
