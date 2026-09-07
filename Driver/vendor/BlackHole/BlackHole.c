@@ -280,6 +280,30 @@ static Float64                      gDevice_RequestedSampleRate         = 0.0;
 static UInt64                       gDevice_IOIsRunning                 = 0;
 static UInt64                       gDevice2_IOIsRunning                = 0;
 static const UInt32                 kDevice_RingBufferSize              = 16384;
+
+//  Device clock rate
+//  -----------------
+//  Host ticks per frame at the current sample rate, and the same figure bent by
+//  the pitch adjust. gClockSource_Value, declared below with the other controls,
+//  picks which of the two BlackHole_GetZeroTimeStamp uses, so the three are read
+//  together as one value: a timestamp that pairs a just-changed clock source with
+//  a tick figure from before the change vends a clock that drifts.
+//
+//  They are written by BlackHole_PerformDeviceConfigurationChange (sample rate)
+//  and BlackHole_SetControlPropertyData (pitch adjust, clock source), all under
+//  gPlugIn_StateMutex. That lock does not exclude GetZeroTimeStamp, which runs on
+//  the HAL's timing thread and reads all three under gDevice_IOMutex - two locks
+//  exclude nothing - so every write takes gDevice_IOMutex across its stores as
+//  well, and each group of related stores lands inside one gDevice_IOMutex
+//  section. That is what makes the reader's view a snapshot rather than a mix of
+//  before and after. gPlugIn_StateMutex still guards the inputs these are computed
+//  from (gDevice_SampleRate, gPitch_Adjust) and the control-path reads.
+//
+//  Lock order stays gPlugIn_StateMutex -> gDevice_IOMutex. The arithmetic and the
+//  mach_timebase_info call are deliberately left outside gDevice_IOMutex, so the
+//  timing thread never waits on more than a couple of stores. BlackHole_Initialize
+//  seeds these once, before the HAL has published a device or started a timing
+//  thread, so there is nothing to exclude there and it takes no lock.
 static Float64                      gDevice_HostTicksPerFrame           = 0.0;
 static Float64                      gDevice_AdjustedTicksPerFrame       = 0.0;
 
@@ -315,6 +339,9 @@ static bool                         gMute_Master_Value                  = false;
 static UInt32                       kClockSource_NumberItems            = 2;
 #define                             kClockSource_InternalFixed         "Internal Fixed"
 #define                             kClockSource_InternalAdjustable    "Internal Adjustable"
+//  Selects between gDevice_HostTicksPerFrame and gDevice_AdjustedTicksPerFrame in
+//  BlackHole_GetZeroTimeStamp, so it is written under gDevice_IOMutex as well as
+//  gPlugIn_StateMutex - see the device clock rate note above.
 static UInt32                       gClockSource_Value                  = 0;
 static bool                         gPitch_Adjust_Enabled               = false;
 
@@ -1028,8 +1055,19 @@ static OSStatus	BlackHole_PerformDeviceConfigurationChange(AudioServerPlugInDriv
             mach_timebase_info(&theTimeBaseInfo);
             Float64 theHostClockFrequency = (Float64)theTimeBaseInfo.denom / (Float64)theTimeBaseInfo.numer;
             theHostClockFrequency *= 1000000000.0;
-            gDevice_HostTicksPerFrame = theHostClockFrequency / gDevice_SampleRate;
-            gDevice_AdjustedTicksPerFrame = gDevice_HostTicksPerFrame - gDevice_HostTicksPerFrame/100.0 * 2.0*(gPitch_Adjust - 0.5);
+            Float64 theNewHostTicksPerFrame = theHostClockFrequency / gDevice_SampleRate;
+            Float64 theNewAdjustedTicksPerFrame = theNewHostTicksPerFrame - theNewHostTicksPerFrame/100.0 * 2.0*(gPitch_Adjust - 0.5);
+            
+            //	publish the new rate under the lock that BlackHole_GetZeroTimeStamp
+            //	reads it through. The state lock held here does not exclude the timing
+            //	thread, so without this the two stores below could be read half-applied.
+            //	The pair goes in together, which is what keeps the reader's view
+            //	consistent; the arithmetic above stays outside, so the timing thread
+            //	never waits on it.
+            pthread_mutex_lock(&gDevice_IOMutex);
+            gDevice_HostTicksPerFrame = theNewHostTicksPerFrame;
+            gDevice_AdjustedTicksPerFrame = theNewAdjustedTicksPerFrame;
+            pthread_mutex_unlock(&gDevice_IOMutex);
             
             //	unlock the state mutex
             pthread_mutex_unlock(&gPlugIn_StateMutex);
@@ -4369,7 +4407,16 @@ static OSStatus	BlackHole_SetControlPropertyData(AudioServerPlugInDriverRef inDr
 					if(gPitch_Adjust != theNewPitch)
 					{
 						gPitch_Adjust = theNewPitch;
-						gDevice_AdjustedTicksPerFrame = gDevice_HostTicksPerFrame - gDevice_HostTicksPerFrame/100.0 * 2.0*(gPitch_Adjust - 0.5);
+
+						//	gDevice_HostTicksPerFrame is only ever written under this same
+						//	state lock, so reading it here is safe; the store, however, races
+						//	BlackHole_GetZeroTimeStamp, which reads this value on the timing
+						//	thread under gDevice_IOMutex. Take that lock across the store only.
+						Float64 theNewAdjustedTicksPerFrame = gDevice_HostTicksPerFrame - gDevice_HostTicksPerFrame/100.0 * 2.0*(gPitch_Adjust - 0.5);
+						pthread_mutex_lock(&gDevice_IOMutex);
+						gDevice_AdjustedTicksPerFrame = theNewAdjustedTicksPerFrame;
+						pthread_mutex_unlock(&gDevice_IOMutex);
+
 						*outNumberPropertiesChanged = 1;
 						outChangedAddresses[0].mSelector = kAudioStereoPanControlPropertyValue;
 						outChangedAddresses[0].mScope = kAudioObjectPropertyScopeGlobal;
@@ -4397,7 +4444,15 @@ static OSStatus	BlackHole_SetControlPropertyData(AudioServerPlugInDriverRef inDr
 					pthread_mutex_lock(&gPlugIn_StateMutex);
 					if(gClockSource_Value != theNewSource)
 					{
+						//	This selects which tick figure BlackHole_GetZeroTimeStamp uses, and
+						//	it reads this on the timing thread under gDevice_IOMutex, which the
+						//	state lock held here does not exclude. Only the store goes inside -
+						//	the notification bookkeeping and the dispatch below must not run
+						//	with the timing thread's lock held.
+						pthread_mutex_lock(&gDevice_IOMutex);
 						gClockSource_Value = theNewSource;
+						pthread_mutex_unlock(&gDevice_IOMutex);
+
 						UInt64 changeAction = (theNewSource > 0) ? ChangeAction_EnablePitchControl : ChangeAction_DisablePitchControl;
 
 						*outNumberPropertiesChanged = 1;
