@@ -16,8 +16,11 @@
 #include <dispatch/dispatch.h>
 #include <mach/mach_time.h>
 #include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <sys/syslog.h>
+#include <unistd.h>
 #include <Accelerate/Accelerate.h>
 #include <Availability.h>
 
@@ -343,7 +346,30 @@ static const UInt32                 kDevice_SampleRatesSize             = sizeof
 #define                             kBytes_Per_Channel                  (kBits_Per_Channel/ 8)
 #define                             kBytes_Per_Frame                    (kNumber_Of_Channels * kBytes_Per_Channel)
 #define                             kRing_Buffer_Frame_Size             ((65536 + kLatency_Frame_Size))
-static Float32*                     gRingBuffer = NULL;
+
+//  Ring buffer lifetime
+//  --------------------
+//  The ring buffer exists exactly while at least one client is between StartIO and
+//  StopIO on either device. gPlugIn_StateMutex serialises the two running counts
+//  with the allocation and the release, so the buffer is published on the 0 -> 1
+//  transition of (gDevice_IOIsRunning + gDevice2_IOIsRunning) and retired on the
+//  1 -> 0 transition. Every read and write of those counts happens under that lock.
+//
+//  BlackHole_DoIOOperation runs on the realtime IO thread and must not take the
+//  lock - blocking there costs dropped audio. It instead announces itself in
+//  gDevice_IOCyclesInFlight before snapshotting the pointer, and BlackHole_StopIO
+//  clears gRingBuffer and then waits for that count to reach zero before calling
+//  free(). The running counts alone are not enough: the HAL does not promise that
+//  an in-flight IO cycle has drained by the time the last client's StopIO runs, so
+//  without this handshake StopIO can free a buffer a cycle is still copying into.
+//
+//  Both sides use sequentially consistent ordering on purpose. StopIO stores NULL
+//  and then reads the in-flight count; DoIOOperation increments the count and then
+//  reads the pointer. Sequential consistency is exactly what guarantees at least one
+//  of the two sees the other's write, so every cycle either observes the retired
+//  (NULL) pointer and moves no audio, or is counted and waited for by StopIO.
+static _Atomic(Float32*)            gRingBuffer                         = NULL;
+static _Atomic(UInt64)              gDevice_IOCyclesInFlight            = 0;
 
 
 //==================================================================================================
@@ -4361,6 +4387,41 @@ Done:
 
 #pragma mark IO Operations
 
+//	Waits for every BlackHole_DoIOOperation call that may still hold a snapshot of the
+//	ring buffer to finish. Only ever called from BlackHole_StopIO, which is a control
+//	thread and never the realtime IO thread, and only after the buffer has been
+//	unpublished - so the count can only fall from here, and any cycle that starts
+//	after the unpublish reads NULL and moves no audio. The IO thread's window is two
+//	memcpys, so in practice this returns on the first check; the bound exists only so
+//	a wedged IO thread cannot hang the caller forever. Returning false means "cycles
+//	may still be holding it, do not free": leaking one 512 KB buffer is strictly
+//	better than writing into freed memory inside coreaudiod.
+static bool	BlackHole_WaitForIOCyclesToDrain(void)
+{
+	const int kDrainSpins = 1000;		//	yield-spin first: the expected case resolves here
+	const int kDrainSleeps = 5000;		//	then back off to 200us naps (~1s ceiling in total)
+
+	for(int theAttempt = 0; theAttempt < kDrainSpins + kDrainSleeps; ++theAttempt)
+	{
+		if(atomic_load_explicit(&gDevice_IOCyclesInFlight, memory_order_seq_cst) == 0)
+		{
+			return true;
+		}
+
+		if(theAttempt < kDrainSpins)
+		{
+			sched_yield();
+		}
+		else
+		{
+			usleep(200);
+		}
+	}
+
+	DebugMsg("BlackHole_StopIO: IO cycles did not drain, leaking the ring buffer rather than freeing one still in use.");
+	return false;
+}
+
 static OSStatus	BlackHole_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID)
 {
 	//	This call tells the device that IO is starting for the given client. When this routine
@@ -4379,37 +4440,53 @@ static OSStatus	BlackHole_StartIO(AudioServerPlugInDriverRef inDriver, AudioObje
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_StartIO: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_StartIO: bad device ID");
-    FailWithAction(inDeviceObjectID == kObjectID_Device && gDevice_IOIsRunning == UINT64_MAX, theAnswer = kAudioHardwareIllegalOperationError, Done, "BlackHole_StartIO: overflow error.");
-    FailWithAction(inDeviceObjectID == kObjectID_Device2 && gDevice2_IOIsRunning == UINT64_MAX, theAnswer = kAudioHardwareIllegalOperationError, Done, "BlackHole_StartIO: overflow error.");
 
-	//	we need to hold the state lock
+	//	we need to hold the state lock. The running counts gate the ring buffer's
+	//	lifetime, so the overflow check belongs inside the lock too: read outside it,
+	//	two concurrent starts could both pass a check that the pair of them then
+	//	invalidates, and the count that decides when the buffer is freed would be wrong.
 	pthread_mutex_lock(&gPlugIn_StateMutex);
-	
-    
-    if (inDeviceObjectID == kObjectID_Device) { gDevice_IOIsRunning += 1; }
-    if (inDeviceObjectID == kObjectID_Device2) { gDevice2_IOIsRunning += 1; }
-    
-    // allocate ring buffer
-    if ((gDevice_IOIsRunning || gDevice2_IOIsRunning) && gRingBuffer == NULL)
-    {
-        gDevice_NumberTimeStamps = 0;
-        gDevice_AnchorSampleTime = 0;
-        gDevice_AnchorHostTime = mach_absolute_time();
-        gDevice_PreviousTicks = 0;
-        gRingBuffer = calloc(kRing_Buffer_Frame_Size * kNumber_Of_Channels, sizeof(Float32));
 
-        if (gRingBuffer == NULL)
+    if ((inDeviceObjectID == kObjectID_Device && gDevice_IOIsRunning == UINT64_MAX) ||
+        (inDeviceObjectID == kObjectID_Device2 && gDevice2_IOIsRunning == UINT64_MAX))
+    {
+        DebugMsg("BlackHole_StartIO: overflow error.");
+        theAnswer = kAudioHardwareIllegalOperationError;
+    }
+    else
+    {
+        if (inDeviceObjectID == kObjectID_Device) { gDevice_IOIsRunning += 1; }
+        if (inDeviceObjectID == kObjectID_Device2) { gDevice2_IOIsRunning += 1; }
+
+        // allocate ring buffer
+        if ((gDevice_IOIsRunning || gDevice2_IOIsRunning) &&
+            atomic_load_explicit(&gRingBuffer, memory_order_relaxed) == NULL)
         {
-            //  There is nowhere to move audio without the ring buffer, so undo the start
-            //  we just counted and fail rather than leaving the IO thread to run against
-            //  a NULL buffer.
-            if (inDeviceObjectID == kObjectID_Device) { gDevice_IOIsRunning -= 1; }
-            if (inDeviceObjectID == kObjectID_Device2) { gDevice2_IOIsRunning -= 1; }
-            theAnswer = kAudioHardwareUnspecifiedError;
+            //  Build it privately first. The IO thread can pick the pointer up the
+            //  instant it becomes visible, so nothing half-initialised may be published.
+            Float32* theNewRingBuffer = calloc(kRing_Buffer_Frame_Size * kNumber_Of_Channels, sizeof(Float32));
+
+            if (theNewRingBuffer == NULL)
+            {
+                //  There is nowhere to move audio without the ring buffer, so undo the start
+                //  we just counted and fail rather than leaving the IO thread to run against
+                //  a NULL buffer.
+                if (inDeviceObjectID == kObjectID_Device) { gDevice_IOIsRunning -= 1; }
+                if (inDeviceObjectID == kObjectID_Device2) { gDevice2_IOIsRunning -= 1; }
+                theAnswer = kAudioHardwareUnspecifiedError;
+            }
+            else
+            {
+                gDevice_NumberTimeStamps = 0;
+                gDevice_AnchorSampleTime = 0;
+                gDevice_AnchorHostTime = mach_absolute_time();
+                gDevice_PreviousTicks = 0;
+
+                atomic_store_explicit(&gRingBuffer, theNewRingBuffer, memory_order_seq_cst);
+            }
         }
     }
-    
-    
+
 	//	unlock the state lock
 	pthread_mutex_unlock(&gPlugIn_StateMutex);
 	
@@ -4430,23 +4507,39 @@ static OSStatus	BlackHole_StopIO(AudioServerPlugInDriverRef inDriver, AudioObjec
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_StopIO: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_StopIO: bad device ID");
-    FailWithAction(inDeviceObjectID == kObjectID_Device && gDevice_IOIsRunning == 0, theAnswer = kAudioHardwareIllegalOperationError, Done, "BlackHole_StartIO: underflow error.");
-    FailWithAction(inDeviceObjectID == kObjectID_Device2 && gDevice2_IOIsRunning == 0, theAnswer = kAudioHardwareIllegalOperationError, Done, "BlackHole_StartIO: underflow error.");
 
-	//	we need to hold the state lock
+	//	we need to hold the state lock. As in StartIO, the underflow check reads a
+	//	running count that decides the ring buffer's lifetime, so it has to be read
+	//	under the same lock that updates it - otherwise two concurrent stops of the
+	//	last client both pass the check and the count wraps instead of reaching zero.
 	pthread_mutex_lock(&gPlugIn_StateMutex);
-	
-    
-    if (inDeviceObjectID == kObjectID_Device) { gDevice_IOIsRunning -= 1; }
-    if (inDeviceObjectID == kObjectID_Device2) { gDevice2_IOIsRunning -= 1; }
-    
-    // free the ring buffer
-    if (!gDevice_IOIsRunning && !gDevice2_IOIsRunning && gRingBuffer != NULL)
+
+    if ((inDeviceObjectID == kObjectID_Device && gDevice_IOIsRunning == 0) ||
+        (inDeviceObjectID == kObjectID_Device2 && gDevice2_IOIsRunning == 0))
     {
-        free(gRingBuffer);
-        gRingBuffer = NULL;
+        DebugMsg("BlackHole_StopIO: underflow error.");
+        theAnswer = kAudioHardwareIllegalOperationError;
     }
-	
+    else
+    {
+        if (inDeviceObjectID == kObjectID_Device) { gDevice_IOIsRunning -= 1; }
+        if (inDeviceObjectID == kObjectID_Device2) { gDevice2_IOIsRunning -= 1; }
+
+        // free the ring buffer
+        if (!gDevice_IOIsRunning && !gDevice2_IOIsRunning)
+        {
+            //  Retire the buffer first, so no IO cycle starting from now can pick it
+            //  up, and only then wait out the cycles that may already hold it. Freeing
+            //  before the drain is what let a running cycle write into freed memory.
+            Float32* theDoomedRingBuffer = atomic_exchange_explicit(&gRingBuffer, NULL, memory_order_seq_cst);
+
+            if ((theDoomedRingBuffer != NULL) && BlackHole_WaitForIOCyclesToDrain())
+            {
+                free(theDoomedRingBuffer);
+            }
+        }
+    }
+
 	//	unlock the state lock
 	pthread_mutex_unlock(&gPlugIn_StateMutex);
 	
@@ -4596,11 +4689,17 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
 	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_DoIOOperation: bad device ID");
 	FailWithAction((inStreamObjectID != kObjectID_Stream_Input) && (inStreamObjectID != kObjectID_Stream_Output), theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_DoIOOperation: bad stream ID");
 
-    // Take one snapshot of the ring buffer. This is the real-time IO thread, so it cannot
-    // take the state lock, and StopIO can release the buffer between cycles. A NULL buffer
-    // means there is nothing to move: the read side vends silence and the write side drops
-    // the mix, rather than faulting.
-    Float32* theRingBuffer = gRingBuffer;
+    // Announce this cycle before looking at the pointer. StopIO clears gRingBuffer and
+    // then waits for this count to reach zero, so a cycle that gets past this point with
+    // a non-NULL snapshot is one StopIO is guaranteed to wait out before it frees. Two
+    // atomic read-modify-writes is the entire realtime cost; the state lock is
+    // deliberately not taken here, because blocking this thread drops audio.
+    atomic_fetch_add_explicit(&gDevice_IOCyclesInFlight, 1, memory_order_seq_cst);
+
+    // Take one snapshot of the ring buffer. A NULL snapshot means the buffer has been
+    // retired and there is nothing to move: the read side vends silence and the write
+    // side drops the mix, rather than faulting.
+    Float32* theRingBuffer = atomic_load_explicit(&gRingBuffer, memory_order_seq_cst);
 
     // Calculate the ring buffer offsets and splits.
     UInt64 mSampleTime = inOperationID == kAudioServerPlugInIOOperationReadInput ? inIOCycleInfo->mInputTime.mSampleTime : inIOCycleInfo->mOutputTime.mSampleTime;
@@ -4660,7 +4759,8 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
         if (inIOCycleInfo->mCurrentTime.mSampleTime > inIOCycleInfo->mOutputTime.mSampleTime + inIOBufferFrameSize + kLatency_Frame_Size)
         {
             DebugMsg("BlackHole overload error. kAudioServerPlugInIOOperationWriteMix was unable to complete operation before the deadline. Try increasing the buffer frame size.");
-            return kAudioHardwareUnspecifiedError;
+            theAnswer = kAudioHardwareUnspecifiedError;
+            goto DoneIOCycle;
         }
         // TODO: Mix into the buffers but we will need to clear the buffers at some point.
         // Issue with outputting from mirrored device and main device at the same time. Not currently mixing. 
@@ -4676,6 +4776,12 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
             isBufferClear = false;
         }
     }
+
+DoneIOCycle:
+    // Release the snapshot. Past this point StopIO is free to release the buffer.
+    // The argument-check failures above jump straight to Done because they return
+    // before the count was ever incremented.
+    atomic_fetch_sub_explicit(&gDevice_IOCyclesInFlight, 1, memory_order_seq_cst);
 
 Done:
 	return theAnswer;
