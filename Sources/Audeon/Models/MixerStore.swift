@@ -942,7 +942,10 @@ final class MixerStore: ObservableObject {
     /// Bumped when the shape of `Persisted` changes incompatibly.
     private static let schemaVersion = 1
 
-    nonisolated struct Persisted: Codable {
+    // Not marked nonisolated: `nonisolated` on a type declaration is newer than
+    // the toolchain on the CI runner. The tests reach this from a @MainActor
+    // context instead, which needs no modifier here.
+    struct Persisted: Codable {
         var version: Int?
         var previousDefaultOutputUID: String?
         var inputs: [InputSource]

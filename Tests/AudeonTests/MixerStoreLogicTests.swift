@@ -148,6 +148,10 @@ final class DefaultColorTests: XCTestCase {
     }
 }
 
+/// `Persisted` is nested inside a @MainActor type, so these run on the main
+/// actor rather than annotating the production type with a modifier the CI
+/// toolchain does not accept.
+@MainActor
 final class PersistedShapeTests: XCTestCase {
     private func sample(version: Int?) -> MixerStore.Persisted {
         MixerStore.Persisted(

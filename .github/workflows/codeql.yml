@@ -97,5 +97,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
+      # Printed so a toolchain mismatch is diagnosable straight from the log:
+      # the runner's Swift can be older than a local one, and syntax that
+      # compiles on a developer machine may not compile here.
+      - name: Show toolchain
+        run: swift --version
+
       - name: Run tests
         run: swift test
