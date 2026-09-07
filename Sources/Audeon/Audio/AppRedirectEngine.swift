@@ -34,6 +34,12 @@ final class AppRedirectEngine: ObservableObject {
     private var units: [String: TapUnit] = [:]   // key: "bundleID|outputUID"
     private let lock = NSLock()
 
+    /// Keys whose tap could not be created, with the process set that failed
+    /// and when it may be retried. Without this, a tap that can never be
+    /// created was retried on every single graph mutation, and each attempt
+    /// rewrote the target device's hardware mute and volume.
+    private var failures: [String: (processes: Set<AudioObjectID>, retryAfter: Date, attempts: Int)] = [:]
+
     init(deviceManager: AudioDeviceManager) {
         self.deviceManager = deviceManager
         Self.cleanupLeakedAggregates()
@@ -54,7 +60,11 @@ final class AppRedirectEngine: ObservableObject {
         }
 
         for (k, unit) in units {
-            if let w = wanted[k], w.processObjects == unit.processes {
+            // Compare as sets: re-enumerating a multi-process app (Chrome,
+            // Edge) returns the same processes in a different order, and
+            // treating that as a change tore the tap down and rebuilt it,
+            // dropping audio and briefly unmuting the app's own output.
+            if let w = wanted[k], unit.isHealthy, Set(w.processObjects) == Set(unit.processes) {
                 unit.configure(volume: w.volume, boost: w.boost, eqEnabled: w.eqEnabled, eq: w.eq, magicBoost: w.magicBoost)
             } else {
                 unit.stop(); units[k] = nil
@@ -62,20 +72,41 @@ final class AppRedirectEngine: ObservableObject {
             }
         }
 
+        let now = Date()
         for (k, w) in wanted where units[k] == nil {
+            // Back off from a tap that keeps failing. A changed process set
+            // means it is worth trying again straight away.
+            if let failure = failures[k] {
+                if failure.processes != Set(w.processObjects) {
+                    failures[k] = nil
+                } else if now < failure.retryAfter {
+                    continue
+                }
+            }
+
             // Same hardware-level wake as the device router: an output that
             // has never been selected in System Settings can sit muted or at
-            // 0% volume with nothing in Audeon having touched it.
-            deviceManager.wakeOutputIfSilent(forUID: w.outputUID)
+            // 0% volume with nothing in Audeon having touched it. Only on a
+            // first attempt -- repeating it on every retry is what let a
+            // failing tap keep overwriting the user's volume.
+            if failures[k] == nil { deviceManager.wakeOutputIfSilent(forUID: w.outputUID) }
 
             if let unit = TapUnit(request: w, onLevel: { [weak self] reading in
                 DispatchQueue.main.async { self?.levels[k] = reading }
             }) {
                 units[k] = unit
+                failures[k] = nil
             } else {
+                let attempts = (failures[k]?.attempts ?? 0) + 1
+                // 2 s, 8 s, 32 s, capped at 2 minutes.
+                let delay = min(pow(4.0, Double(attempts - 1)) * 2.0, 120.0)
+                failures[k] = (Set(w.processObjects), now.addingTimeInterval(delay), attempts)
                 DispatchQueue.main.async { self.lastError = "Could not capture \(w.bundleID)" }
             }
         }
+
+        // Forget failures for taps nobody wants any more.
+        for k in failures.keys where wanted[k] == nil { failures[k] = nil }
     }
 
     func stopAll() {
@@ -131,6 +162,11 @@ private final class TapUnit {
     private var started = false
     private let onLevel: (MeterReading) -> Void
     private let throttle = MeterThrottle()
+
+    /// False once AVAudioEngine has stopped underneath us — which it does on a
+    /// configuration change. A dead unit left mounted kept the process tap
+    /// alive, so the app stayed muted on its own output and silent everywhere.
+    var isHealthy: Bool { started && engine.isRunning }
 
     init?(request: AppTapRequest, onLevel: @escaping (MeterReading) -> Void) {
         self.processes = request.processObjects
