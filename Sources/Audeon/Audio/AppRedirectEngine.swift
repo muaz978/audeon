@@ -92,20 +92,27 @@ final class AppRedirectEngine: ObservableObject {
         // (Chrome, Edge) returns the same processes in a different order, and
         // treating that as a change tore the tap down and rebuilt it, dropping
         // audio and briefly unmuting the app's own output.
-        var doomed: [(String, TapUnit)] = []
+        // Three outcomes, not two. A unit whose key nobody wants any more is
+        // retired immediately. A unit that needs rebuilding — usually because
+        // the app gained or lost an audio process — is left running until its
+        // replacement has been built, so the app keeps playing meanwhile.
+        var retired: [(String, TapUnit)] = []
+        var outgoing: [String: TapUnit] = [:]
         var survivors: [String: TapUnit] = [:]
         lock.lock()
         for (k, unit) in units {
             if let w = wanted[k], unit.isHealthy, Set(w.processObjects) == Set(unit.processes) {
                 survivors[k] = unit
+            } else if wanted[k] != nil {
+                outgoing[k] = unit          // stays in `units`, and stays playing
             } else {
-                doomed.append((k, unit))
+                retired.append((k, unit))
                 units[k] = nil
             }
         }
         lock.unlock()
 
-        for (k, unit) in doomed {
+        for (k, unit) in retired {
             unit.stop()
             DispatchQueue.main.async { self.levels[k] = nil }
         }
@@ -137,8 +144,23 @@ final class AppRedirectEngine: ObservableObject {
             if let unit = TapUnit(request: w, onLevel: { [weak self] reading in
                 self?.record(reading, for: k)
             }) {
-                lock.lock(); units[k] = unit; lock.unlock()
-                failures[k] = nil
+                // Everything expensive is done and the outgoing unit has been
+                // playing throughout. Only the engine start sits between the
+                // two, instead of a whole teardown and rebuild. The incoming
+                // tap is already muting the app, so its own output never
+                // briefly unmutes during the swap either.
+                outgoing.removeValue(forKey: k)?.stop()
+                if unit.start() {
+                    lock.lock(); units[k] = unit; lock.unlock()
+                    failures[k] = nil
+                    continue
+                }
+                unit.stop()
+                lock.lock(); units[k] = nil; lock.unlock()
+                let attempts = (failures[k]?.attempts ?? 0) + 1
+                let delay = min(pow(4.0, Double(attempts - 1)) * 2.0, 120.0)
+                failures[k] = (Set(w.processObjects), now.addingTimeInterval(delay), attempts)
+                DispatchQueue.main.async { self.lastError = "Could not capture \(w.bundleID)" }
             } else {
                 let attempts = (failures[k]?.attempts ?? 0) + 1
                 // 2 s, 8 s, 32 s, capped at 2 minutes.
@@ -146,6 +168,13 @@ final class AppRedirectEngine: ObservableObject {
                 failures[k] = (Set(w.processObjects), now.addingTimeInterval(delay), attempts)
                 DispatchQueue.main.async { self.lastError = "Could not capture \(w.bundleID)" }
             }
+        }
+
+        // A unit whose replacement could not be built keeps running rather than
+        // being stopped. Its process set is stale, but stale audio beats none,
+        // and the backoff above governs when the rebuild is retried.
+        for (k, unit) in outgoing where units[k] === unit {
+            NSLog("Audeon.route: keeping the existing tap for \(k); its replacement could not be built")
         }
 
         // Forget failures for taps nobody wants any more.
@@ -207,6 +236,15 @@ final class AppRedirectEngine: ObservableObject {
         DispatchQueue.main.async { self.levels.removeAll() }
     }
 
+    /// True when a capture unit for this app and output exists *and its engine
+    /// is running*. The health check is the point: a unit that was constructed
+    /// but never started still sits in the map, so testing only for presence
+    /// would pass while no audio flows at all.
+    func hasLiveUnit(bundleID: String, outputUID: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return units[key(bundleID, outputUID)]?.isHealthy ?? false
+    }
+
     /// Attach or detach a recorder on a live capture unit. The key is the same
     /// "bundleID|outputUID" used internally by apply().
     func setRecorder(bundleID: String, outputUID: String, _ recorder: MixRecorder?) {
@@ -243,6 +281,8 @@ final class AppRedirectEngine: ObservableObject {
 
 private final class TapUnit {
     let processes: [AudioObjectID]
+    private let bundleID: String
+    private let outputUID: String
     let recorderSlot = RecorderSlot()
 
     private var tapID: AudioObjectID = 0
@@ -261,6 +301,8 @@ private final class TapUnit {
 
     init?(request: AppTapRequest, onLevel: @escaping (MeterReading) -> Void) {
         self.processes = request.processObjects
+        self.bundleID = request.bundleID
+        self.outputUID = request.outputUID
         self.onLevel = onLevel
 
         guard #available(macOS 14.2, *) else {
@@ -342,19 +384,29 @@ private final class TapUnit {
             onLevel(AudioMeter.reading(for: buffer))
         }
 
+        engine.prepare()
+    }
+
+    /// Begin passing audio. Split from `init` so a replacement unit can be
+    /// built while the unit it replaces is still playing: everything expensive
+    /// — creating the process tap, creating the private aggregate, wiring the
+    /// engine — happens during construction, leaving only this call between the
+    /// outgoing unit stopping and the incoming one taking over.
+    func start() -> Bool {
+        guard !started else { return true }
         let inFmt = engine.inputNode.outputFormat(forBus: 0)
         let outFmt = engine.outputNode.inputFormat(forBus: 0)
         do {
-            engine.prepare()
             try engine.start()
             started = true
-            NSLog("Audeon.route: STARTED app tap \(request.bundleID) -> \(request.outputUID) | in \(Int(inFmt.channelCount))ch@\(Int(inFmt.sampleRate)) out \(Int(outFmt.channelCount))ch@\(Int(outFmt.sampleRate))")
+            NSLog("Audeon.route: STARTED app tap \(bundleID) -> \(outputUID) | in \(Int(inFmt.channelCount))ch@\(Int(inFmt.sampleRate)) out \(Int(outFmt.channelCount))ch@\(Int(outFmt.sampleRate))")
+            return true
         } catch {
             // Previously this error was swallowed silently, so a route that
             // failed to start just vanished and the app appeared to "only route
             // to the default output". Surface it instead.
-            NSLog("Audeon.route: FAILED app tap \(request.bundleID) -> \(request.outputUID): \(error) | in \(Int(inFmt.channelCount))ch out \(Int(outFmt.channelCount))ch")
-            cleanup(); return nil
+            NSLog("Audeon.route: FAILED app tap \(bundleID) -> \(outputUID): \(error) | in \(Int(inFmt.channelCount))ch out \(Int(outFmt.channelCount))ch")
+            return false
         }
     }
 
