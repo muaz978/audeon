@@ -241,6 +241,65 @@ final class HardwareIntegrationTests: XCTestCase {
         waitForUnit(true, "the tap did not survive a process-set change")
     }
 
+    /// A device disappearing while a route is live.
+    ///
+    /// Unplugging hardware needs hands, but destroying an aggregate device is
+    /// indistinguishable from it as far as CoreAudio is concerned: the device
+    /// leaves the device list and its id stops resolving. That is the exact
+    /// path that used to leave the engine running with a stale meter, leaking
+    /// its own aggregate and I/O proc for the lifetime of the app.
+    func testRouteTearsDownWhenItsOutputDeviceDisappears() throws {
+        let sub = try XCTUnwrap(manager.outputs.first { !manager.isVirtualSystemAudio($0.uid) }?.uid,
+                                "no real output device to build a temporary aggregate over")
+        // Deliberately not the "audeon." prefix: AudioDeviceManager hides those
+        // from its published lists, and this one has to be visible to be routed to.
+        let tempUID = "test.audeon.vanishing.\(UUID().uuidString)"
+        let description: [String: Any] = [
+            kAudioAggregateDeviceNameKey as String: "Audeon Test Vanishing",
+            kAudioAggregateDeviceUIDKey as String: tempUID,
+            kAudioAggregateDeviceIsPrivateKey as String: 1,
+            kAudioAggregateDeviceIsStackedKey as String: 0,
+            kAudioAggregateDeviceMainSubDeviceKey as String: sub,
+            kAudioAggregateDeviceSubDeviceListKey as String: [[kAudioSubDeviceUIDKey as String: sub]]
+        ]
+        var tempID: AudioObjectID = 0
+        let created = AudioHardwareCreateAggregateDevice(description as CFDictionary, &tempID)
+        try XCTSkipUnless(created == noErr && tempID != 0,
+                          "could not create a temporary aggregate device (status \(created))")
+        var destroyed = false
+        defer { if !destroyed { AudioHardwareDestroyAggregateDevice(tempID) } }
+
+        // Let the device list settle so the manager can resolve the new uid.
+        manager.refresh()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        manager.refresh()
+        try XCTSkipUnless(manager.deviceID(forUID: tempUID) != nil,
+                          "the temporary device did not appear in the device list")
+
+        let r = route(from: loopbackUID, to: tempUID)
+        router.apply(routes: [r])
+        XCTAssertTrue(waitForEngine(r.id), "the route to the temporary device never started")
+
+        // The device goes away underneath the running route.
+        XCTAssertEqual(AudioHardwareDestroyAggregateDevice(tempID), noErr)
+        destroyed = true
+        manager.refresh()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        manager.refresh()
+        XCTAssertNil(manager.deviceID(forUID: tempUID), "the device should be gone from the map")
+
+        // Reconciliation must now stop and clear the engine rather than leave a
+        // dead route running.
+        router.apply(routes: [r])
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if !router.hasEngine(routeID: r.id) { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertFalse(router.hasEngine(routeID: r.id),
+                       "the engine outlived its device: this is the stale-route leak")
+    }
+
     /// Audio process objects on this machine, for building a tap request.
     private static func audioProcessObjects() -> [AudioObjectID] {
         var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyProcessObjectList,
