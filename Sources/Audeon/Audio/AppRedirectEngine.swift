@@ -26,6 +26,49 @@ struct AppTapRequest: Equatable {
 /// an AVAudioEngine (with EQ and boost) to a chosen output device, muting the
 /// original. One tap + private aggregate device per (app, output) pair, so an
 /// app can feed several outputs at once.
+///
+/// Concurrency: deliberately **not** `Sendable`, unlike its sibling
+/// `AudioRouter`. The same audit was done here and one field does not pass it.
+/// Field by field:
+///
+/// - `lastError`, `levels`: main thread only. Both are written exclusively
+///   inside `DispatchQueue.main.async` blocks, or by `drainLevels()`, which
+///   runs on a timer scheduled on `.main`, and both are read only from
+///   `MixerStore` and the views, which are `@MainActor`.
+/// - `deviceManager`: a `let` of a type that is itself `@unchecked Sendable`
+///   under its own audit. The two methods `applyOnWorker` calls on it off the
+///   main thread, `deviceID(forUID:)` and `wakeOutputIfSilent(forUID:)`, reach
+///   only its `mapLock`-guarded uid map and stateless CoreAudio property calls.
+/// - `failures`: confined to `work`. `applyOnWorker` is the only thing that
+///   touches it and the only thing that runs on that serial queue, so the queue
+///   is the mutual exclusion.
+/// - `pendingLevels`, `liveKeys`: guarded by `meterLock`, at every access. The
+///   tap callbacks only ever `trylock` it, so contention costs a meter frame
+///   rather than a realtime deadline.
+/// - `meterPump`: main thread only. `syncMeterPump(hasUnits:)` is its sole
+///   mutator and is called from exactly one place, inside a
+///   `DispatchQueue.main.async`.
+/// - `lock`, `meterLock`, `work`: immutable, and `NSLock`, a pointer and a
+///   `DispatchQueue` are all Sendable.
+/// - `units`: guarded by `lock` at every access **but one**. The
+///   `for (k, unit) in outgoing where units[k] === unit` loop near the end of
+///   `applyOnWorker` reads the dictionary without taking the lock, while the
+///   other nine accesses all take it.
+///
+/// That last one is not a live data race today, and the reason it is not is the
+/// problem. `applyOnWorker` is serial with itself, so the only writer that could
+/// run alongside that read is `stopAll()`, and `stopAll()` cannot: both it and
+/// `apply()` are called only from `MixerStore` and the tests, which are
+/// `@MainActor`, so the main thread is inside `stopAll()` when it drains the
+/// queue and nothing can enqueue past it. The safety therefore rests on an
+/// invariant held in another file, about which threads call this one.
+///
+/// `Sendable` is precisely the promise that no such invariant is needed. Making
+/// this type `@unchecked Sendable` would let a `stopAll()` be called from any
+/// thread with no diagnostic, putting `units.removeAll()` next to an unguarded
+/// dictionary read — so the conformance is withheld until that read takes the
+/// lock like its nine neighbours do. Annotating around it would buy a lower
+/// warning count by discarding the only thing the warning was protecting.
 final class AppRedirectEngine: ObservableObject {
     @Published private(set) var lastError: String?
     /// Live meter per (bundleID, outputUID) key, same key as `units`.
