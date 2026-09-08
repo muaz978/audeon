@@ -27,9 +27,8 @@ struct AppTapRequest: Equatable {
 /// original. One tap + private aggregate device per (app, output) pair, so an
 /// app can feed several outputs at once.
 ///
-/// Concurrency: deliberately **not** `Sendable`, unlike its sibling
-/// `AudioRouter`. The same audit was done here and one field does not pass it.
-/// Field by field:
+/// Concurrency: `@unchecked Sendable`, on the same audit as its sibling
+/// `AudioRouter`. Field by field:
 ///
 /// - `lastError`, `levels`: main thread only. Both are written exclusively
 ///   inside `DispatchQueue.main.async` blocks, or by `drainLevels()`, which
@@ -50,26 +49,25 @@ struct AppTapRequest: Equatable {
 ///   `DispatchQueue.main.async`.
 /// - `lock`, `meterLock`, `work`: immutable, and `NSLock`, a pointer and a
 ///   `DispatchQueue` are all Sendable.
-/// - `units`: guarded by `lock` at every access **but one**. The
-///   `for (k, unit) in outgoing where units[k] === unit` loop near the end of
-///   `applyOnWorker` reads the dictionary without taking the lock, while the
-///   other nine accesses all take it.
+/// - `units`: guarded by `lock` at every access, all ten of them. The last
+///   holdout was the "which outgoing taps are still playing" loop at the end
+///   of `applyOnWorker`, which read the dictionary bare; it now takes its
+///   snapshot under the lock and logs from that.
 ///
-/// That last one is not a live data race today, and the reason it is not is the
-/// problem. `applyOnWorker` is serial with itself, so the only writer that could
-/// run alongside that read is `stopAll()`, and `stopAll()` cannot: both it and
+/// That read was not a live data race even before the fix, and the reason it
+/// was not is why it was worth fixing rather than annotating around.
+/// `applyOnWorker` is serial with itself, so the only writer that could have
+/// run alongside it is `stopAll()`, and `stopAll()` could not: both it and
 /// `apply()` are called only from `MixerStore` and the tests, which are
 /// `@MainActor`, so the main thread is inside `stopAll()` when it drains the
-/// queue and nothing can enqueue past it. The safety therefore rests on an
-/// invariant held in another file, about which threads call this one.
-///
-/// `Sendable` is precisely the promise that no such invariant is needed. Making
-/// this type `@unchecked Sendable` would let a `stopAll()` be called from any
+/// queue and nothing can enqueue past it. The safety rested on an invariant
+/// held in another file, about which threads call this one — and `Sendable` is
+/// precisely the promise that no such invariant is needed. Conforming with the
+/// bare read still in place would have let a `stopAll()` be called from any
 /// thread with no diagnostic, putting `units.removeAll()` next to an unguarded
-/// dictionary read — so the conformance is withheld until that read takes the
-/// lock like its nine neighbours do. Annotating around it would buy a lower
-/// warning count by discarding the only thing the warning was protecting.
-final class AppRedirectEngine: ObservableObject {
+/// dictionary read: a lower warning count bought by discarding the only thing
+/// the warning was protecting.
+final class AppRedirectEngine: ObservableObject, @unchecked Sendable {
     @Published private(set) var lastError: String?
     /// Live meter per (bundleID, outputUID) key, same key as `units`.
     @Published private(set) var levels: [String: MeterReading] = [:]
