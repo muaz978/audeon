@@ -84,6 +84,15 @@ rm -rf /Applications/Audeon.app && mv Audeon.app /Applications/
 open /Applications/Audeon.app
 ```
 
+Because the build is ad hoc signed rather than notarized, there is no Apple
+identity to check it against, so every release also ships a `SHA256SUMS.txt`.
+Verifying against it is the one integrity check available:
+
+```bash
+cd ~/Downloads
+shasum -a 256 -c SHA256SUMS.txt --ignore-missing
+```
+
 If macOS still blocks it, run the binary directly to confirm it works:
 
 ```bash
@@ -122,6 +131,44 @@ You can also open the folder in Xcode (File > Open) and run the Audeon scheme.
 On first launch macOS asks for microphone access, which is needed to read input
 devices. If you miss the prompt, enable it under
 System Settings > Privacy & Security > Microphone.
+
+## Cutting a release
+
+Both shipping artifacts are produced by the `Release` workflow, so a release is
+a tag rather than a sequence of local build commands whose output nobody can
+reproduce.
+
+1. Bump `CFBundleShortVersionString` (and `CFBundleVersion`) in
+   `Resources/Info.plist`, and merge that.
+2. Tag the merge commit and push the tag:
+
+   ```bash
+   git tag v0.11.0 && git push origin v0.11.0
+   ```
+
+3. The workflow builds the universal `.app` and the universal driver on a clean
+   runner, checks both are genuinely two-architecture, verifies the signatures
+   survive being archived, writes `SHA256SUMS.txt`, and attaches all three to
+   that tag's release.
+4. Review the drafted notes and publish the release yourself. The workflow
+   never publishes: release-drafter writes the notes as PRs merge, and pressing
+   the button stays a human decision.
+
+If the tag and `Info.plist` disagree about the version, step 3 fails
+immediately and says which to change. That mismatch is the specific mistake
+this is built to prevent, since it otherwise ships an app that misreports its
+own version and is only noticed much later.
+
+To exercise the whole build without cutting a release, run the workflow
+manually (`Actions > Release > Run workflow`). It builds and verifies both
+artifacts, uploads them as workflow artifacts, and touches no release.
+
+The artifacts can also be built locally, which is what the workflow runs:
+
+```bash
+./scripts/package-app.sh      # dist/Audeon-<version>-macos.zip
+./Driver/package-driver.sh    # Driver/dist/Audeon-Driver-macos.zip
+```
 
 ## How to use
 
@@ -256,7 +303,13 @@ Still planned:
 1. Verify the reliability pass on real hardware. The recorder rewrite and the
    newly asynchronous route startup are verified by sanitizers, static analysis
    and the driver test suite, but not yet by listening.
-2. Sign and notarize the app and driver for one-click installs.
+2. Sign and notarize the app and driver for one-click installs. Building and
+   attaching the artifacts is now automated: tagging `vX.Y.Z` builds the
+   universal app and driver on a clean runner, refuses to proceed if the tag
+   and `Info.plist` disagree about the version, and attaches both plus
+   `SHA256SUMS.txt` to that tag's draft release. Signing is the part that
+   remains, and it needs a paid Apple Developer membership rather than more
+   automation.
 3. A Swift test target. There is none today, so nothing catches a regression in
    the pure-logic paths: persistence and schema migration, choosing a device to
    restore the system output to, Output Group expansion, and the recording ring

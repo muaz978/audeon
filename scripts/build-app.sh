@@ -3,13 +3,27 @@
 # microphone access (TCC reads Info.plist from the bundle).
 #
 # Usage:
-#   ./scripts/build-app.sh           # debug build + launch
-#   ./scripts/build-app.sh release   # optimized build + launch
+#   ./scripts/build-app.sh                        # debug build + launch
+#   ./scripts/build-app.sh release                # optimized build + launch
+#   ./scripts/build-app.sh release --no-launch    # build only, do not run it
+#
+# --no-launch exists for CI and for packaging: a release runner has no display
+# to open the app on, and package-app.sh wants the assembled bundle, not a
+# running copy.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-CONFIG="${1:-debug}"
+CONFIG="debug"
+LAUNCH=1
+for arg in "$@"; do
+    case "$arg" in
+        debug|release) CONFIG="$arg" ;;
+        --no-launch)   LAUNCH=0 ;;
+        *) echo "unknown argument: $arg"; echo "usage: $0 [debug|release] [--no-launch]"; exit 2 ;;
+    esac
+done
+
 APP="build/Audeon.app"
 
 # Release builds are universal (Apple Silicon + Intel) to match the deployment
@@ -42,6 +56,11 @@ if ! codesign --force --sign - "$APP"; then
     echo "codesign failed. Without a signature the bundle has no stable identity"
     echo "and macOS will not grant it microphone access."
     exit 1
+fi
+
+if [ "$LAUNCH" -eq 0 ]; then
+    echo ">> built $APP (not launched)"
+    exit 0
 fi
 
 echo ">> launching"

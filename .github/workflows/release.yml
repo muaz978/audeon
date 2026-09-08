@@ -1,0 +1,128 @@
+name: "Release"
+
+# Every release until now was built and uploaded by hand, which is how a tag and
+# the version inside the app can quietly drift apart. This builds both shipping
+# artifacts on a clean runner, refuses to build if the tag and the bundle
+# disagree about the version, and attaches them to the release for that tag.
+#
+# It deliberately stops short of publishing. release-drafter already keeps a
+# draft with the notes; this fills that draft in with binaries and leaves the
+# decision to publish to a person.
+on:
+  push:
+    tags: [ 'v*' ]
+  # A dry run: builds and verifies both artifacts and uploads them as workflow
+  # artifacts, without going near a release. This is how the pipeline gets
+  # tested without cutting a release to test it.
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Show the toolchain
+        run: swift --version
+
+      # The guard that makes tag-driven releases trustworthy. A tag of v0.11.0
+      # on a tree whose Info.plist still says 0.10.1 would ship an app that
+      # misreports its own version, and the mistake would only surface in a bug
+      # report months later. Fail here instead, with the fix spelled out.
+      - name: Check the tag agrees with the bundle version
+        run: |
+          set -euo pipefail
+          PLIST_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)"
+          echo "Info.plist CFBundleShortVersionString: $PLIST_VERSION"
+          if [ "${GITHUB_REF_TYPE:-}" != "tag" ]; then
+            echo "Not a tag build (dry run) -- skipping the tag/version comparison."
+            exit 0
+          fi
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "Tag: $GITHUB_REF_NAME (version $TAG_VERSION)"
+          if [ "$TAG_VERSION" != "$PLIST_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Resources/Info.plist ($PLIST_VERSION)."
+            echo "Bump CFBundleShortVersionString to $TAG_VERSION (and CFBundleVersion), commit, then re-tag."
+            exit 1
+          fi
+          echo "Tag and bundle version agree."
+
+      - name: Package the app
+        run: ./scripts/package-app.sh
+
+      - name: Package the driver
+        run: ./Driver/package-driver.sh
+
+      # Ad-hoc signing means a download cannot be verified against an Apple
+      # identity, so a checksum is the only integrity handle a user has. It is
+      # worth more here than it would be on a notarized build, not less.
+      - name: Collect artifacts and checksums
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp dist/Audeon-*-macos.zip release/
+          cp Driver/dist/Audeon-Driver-macos.zip release/
+          cd release
+          shasum -a 256 ./*.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: audeon-release-artifacts
+          path: release/**
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Attach to release
+    # Only on a tag. A dry run stops after `package`, having proved the build
+    # works without creating or touching anything public.
+    if: github.ref_type == 'tag'
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # Write is scoped to this job alone; the build job above never has it.
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: audeon-release-artifacts
+          path: release
+
+      - name: Attach the artifacts to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ls -l release
+
+          # release-drafter normally already has a draft on this tag, holding the
+          # notes. Attach to it rather than racing it with a second release.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG exists; uploading into it."
+          else
+            echo "No release for $TAG yet; creating a draft to hold the artifacts."
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --draft --title "Audeon ${TAG#v}" \
+              --notes "Artifacts built by the Release workflow. Notes pending."
+          fi
+
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber release/*
+
+          echo "::notice::Artifacts attached to $TAG. The release is left unpublished on purpose -- review the notes and publish it by hand."

@@ -2,6 +2,8 @@
 .build/
 build/
 dist/
+# staging dir the Release workflow assembles artifacts in
+release/
 *.xcodeproj
 .swiftpm/
 xcuserdata/
