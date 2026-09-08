@@ -216,7 +216,10 @@ final class AppRedirectEngine: ObservableObject {
         // A unit whose replacement could not be built keeps running rather than
         // being stopped. Its process set is stale, but stale audio beats none,
         // and the backoff above governs when the rebuild is retried.
-        for (k, unit) in outgoing where units[k] === unit {
+        lock.lock()
+        let kept = outgoing.filter { units[$0.key] === $0.value }.keys.sorted()
+        lock.unlock()
+        for k in kept {
             NSLog("Audeon.route: keeping the existing tap for \(k); its replacement could not be built")
         }
 
