@@ -372,11 +372,27 @@ final class RecorderSlot {
     /// Main thread. The previous recorder is released after the lock is
     /// dropped, so deallocation never happens while a callback is waiting.
     func set(_ recorder: MixRecorder?) {
+        withExtendedLifetime(replace(with: recorder)) {}
+    }
+
+    /// Like `set`, but hands the displaced recorder back instead of releasing
+    /// it here. A caller reassigning several slots at once holds a lock across
+    /// the batch, and dropping the last reference to a `MixRecorder` runs its
+    /// `deinit`, which finishes the file and waits for the writer thread --
+    /// none of which should happen with another lock held.
+    func replace(with recorder: MixRecorder?) -> MixRecorder? {
         os_unfair_lock_lock(lock)
         let previous = stored
         stored = recorder
         os_unfair_lock_unlock(lock)
-        withExtendedLifetime(previous) {}
+        return previous
+    }
+
+    /// True when this exact recorder is the one mounted here.
+    func holds(_ recorder: MixRecorder) -> Bool {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        return stored === recorder
     }
 
     /// Audio thread. Returns a strong reference, or nil if none is mounted or
