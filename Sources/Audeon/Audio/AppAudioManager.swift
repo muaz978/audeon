@@ -27,7 +27,26 @@ struct AudioApp: Identifiable, Equatable {
 /// Auto-discovers applications that the audio system is tracking, so they can be
 /// shown in the Applications list and routed individually. Uses the Core Audio
 /// process object list (macOS 14.2+).
-final class AppAudioManager: ObservableObject {
+///
+/// Concurrency: `@unchecked Sendable`, because every stored property is
+/// confined to the main thread:
+///
+/// - `apps`, `runningBundleIDs`: written only inside the
+///   `DispatchQueue.main.async` block that closes `refresh()`, and read only
+///   from `MixerStore` and the views, which are `@MainActor`.
+/// - `listenerBlock`, `timer`, `workspaceObservers`: established by `init` on
+///   the main thread and torn down by `deinit`. Nothing writes them in between,
+///   and nothing else reads them.
+///
+/// `refresh()` is the only method that could plausibly be called from another
+/// thread, and it holds no stored property while it works: the enumeration runs
+/// entirely in locals and static helpers, and only the trailing main-queue block
+/// touches `self`. In practice every caller is already on the main thread — the
+/// initializer, the workspace observers (`queue: .main`), the backstop `Timer`
+/// on the main run loop, and the CoreAudio process-list listener, which is
+/// installed with `DispatchQueue.main`. That belt-and-braces arrangement is why
+/// this type needs no lock at all.
+final class AppAudioManager: ObservableObject, @unchecked Sendable {
     @Published private(set) var apps: [AudioApp] = []
     /// Bundle ids of all regular apps currently running, regardless of whether
     /// they have produced audio yet. Drives the active state of input cards.
@@ -64,7 +83,10 @@ final class AppAudioManager: ObservableObject {
             let token = nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 // Give CoreAudio a moment to register the new process, then refresh.
                 self?.refresh()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { self?.refresh() }
+                // Its own capture list rather than a reference to the outer
+                // block's `self`: same weak semantics, but the deferred block
+                // no longer reads a variable another block owns.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.refresh() }
             }
             workspaceObservers.append(token)
         }

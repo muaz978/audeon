@@ -37,7 +37,36 @@ let audeonRouteAggregateUIDPrefix = "audeon.route."
 ///   primitive already proven by the earliest per-app capture engine.
 ///   Trade-off: gain and mute apply on this path, while EQ, overdrive, and
 ///   Magic Boost do not yet.
-final class AudioRouter: ObservableObject {
+///
+/// Concurrency: `@unchecked Sendable`. This type is reached from three places
+/// at once — SwiftUI on the main actor, the `work` queue, and CoreAudio's
+/// realtime callbacks — so the conformance is only worth having if it can be
+/// checked. Every stored property, and how it is protected:
+///
+/// - `lastError`, `levels`: main thread only. Both are written exclusively
+///   inside `DispatchQueue.main.async` blocks, or by `drainLevels()`, which
+///   runs on a timer scheduled on `.main`. Both are read only from
+///   `MixerStore` and the views, which are `@MainActor`.
+/// - `deviceManager`: a `let` of a type that is itself `@unchecked Sendable`
+///   under its own audit. The two methods `applyOnWorker` calls on it off the
+///   main thread, `deviceID(forUID:)` and `wakeOutputIfSilent(forUID:)`, reach
+///   only its `mapLock`-guarded uid map and stateless CoreAudio property calls.
+/// - `engines`: guarded by `lock`. Every access takes it, and it is never held
+///   across a HAL call. The engine objects it holds are started, configured and
+///   stopped only on `work`, or on the main thread inside `stopAll()` after
+///   `work.sync {}` has drained that queue; `setRecorder` and `hasEngine` reach
+///   an engine from the main thread but touch only its `RecorderSlot`, which
+///   carries its own lock.
+/// - `pendingLevels`, `liveRouteIDs`: guarded by `meterLock`. The audio thread
+///   only ever `trylock`s it, so contention costs a meter frame rather than a
+///   realtime deadline.
+/// - `meterPump`: main thread only. `syncMeterPump(hasEngines:)` is its sole
+///   mutator and is called from exactly one place, inside a
+///   `DispatchQueue.main.async`; `deinit` cancels it at a point where the last
+///   reference is by definition already gone.
+/// - `lock`, `meterLock`, `work`: immutable, and `NSLock`, a pointer and a
+///   `DispatchQueue` are all Sendable.
+final class AudioRouter: ObservableObject, @unchecked Sendable {
     @Published private(set) var lastError: String?
     /// Live meter per route id (same id as the connection it came from).
     @Published private(set) var levels: [UUID: MeterReading] = [:]

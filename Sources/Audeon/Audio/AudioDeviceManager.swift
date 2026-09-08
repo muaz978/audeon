@@ -38,7 +38,31 @@ struct AudioEndpoint: Identifiable, Hashable {
 
 /// Enumerates CoreAudio devices and republishes whenever the device list
 /// changes (hot-plug, sample-rate change, default-device change, etc.).
-final class AudioDeviceManager: ObservableObject {
+///
+/// Concurrency: `@unchecked Sendable`. The routing engines hold a reference to
+/// this object and resolve uids from their own work queues, so this claim has
+/// to be earned rather than assumed. Field by field:
+///
+/// - `inputs`, `outputs`: main thread only. `refresh()` does its enumeration in
+///   locals and publishes through `apply`, which runs inline only when
+///   `Thread.isMainThread` and is dispatched to `.main` otherwise. Every reader
+///   is on the main actor: `endpoint(forUID:)`, `isVirtualSystemAudio(_:)` and
+///   `systemAudioSinkUID` are called from `MixerStore` (`@MainActor`), the
+///   views, `SinkGuard` and `SystemAudioController`, both of which are driven
+///   from the main queue.
+/// - `deviceIDByUID`: guarded by `mapLock`, at both accesses. This is the one
+///   piece of state a background queue reads, which is why it has a lock and
+///   the published arrays do not.
+/// - `listenerBlock`: written once by `installDeviceListChangeListener()` from
+///   `init`, read once by `removeDeviceListChangeListener()` from `deinit`, and
+///   never touched in between.
+/// - `mapLock`: immutable, and a pointer is Sendable.
+///
+/// Note what this does *not* say: the `DeviceControls` extension is safe from a
+/// work queue only because those methods go through `deviceID(forUID:)` and
+/// then make stateless CoreAudio property calls. Anything added there that
+/// reads `inputs` or `outputs` would have to be main-thread only.
+final class AudioDeviceManager: ObservableObject, @unchecked Sendable {
     @Published private(set) var inputs: [AudioEndpoint] = []
     @Published private(set) var outputs: [AudioEndpoint] = []
 

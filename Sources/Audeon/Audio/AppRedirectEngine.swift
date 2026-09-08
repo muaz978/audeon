@@ -26,7 +26,48 @@ struct AppTapRequest: Equatable {
 /// an AVAudioEngine (with EQ and boost) to a chosen output device, muting the
 /// original. One tap + private aggregate device per (app, output) pair, so an
 /// app can feed several outputs at once.
-final class AppRedirectEngine: ObservableObject {
+///
+/// Concurrency: `@unchecked Sendable`, on the same audit as its sibling
+/// `AudioRouter`. Field by field:
+///
+/// - `lastError`, `levels`: main thread only. Both are written exclusively
+///   inside `DispatchQueue.main.async` blocks, or by `drainLevels()`, which
+///   runs on a timer scheduled on `.main`, and both are read only from
+///   `MixerStore` and the views, which are `@MainActor`.
+/// - `deviceManager`: a `let` of a type that is itself `@unchecked Sendable`
+///   under its own audit. The two methods `applyOnWorker` calls on it off the
+///   main thread, `deviceID(forUID:)` and `wakeOutputIfSilent(forUID:)`, reach
+///   only its `mapLock`-guarded uid map and stateless CoreAudio property calls.
+/// - `failures`: confined to `work`. `applyOnWorker` is the only thing that
+///   touches it and the only thing that runs on that serial queue, so the queue
+///   is the mutual exclusion.
+/// - `pendingLevels`, `liveKeys`: guarded by `meterLock`, at every access. The
+///   tap callbacks only ever `trylock` it, so contention costs a meter frame
+///   rather than a realtime deadline.
+/// - `meterPump`: main thread only. `syncMeterPump(hasUnits:)` is its sole
+///   mutator and is called from exactly one place, inside a
+///   `DispatchQueue.main.async`.
+/// - `lock`, `meterLock`, `work`: immutable, and `NSLock`, a pointer and a
+///   `DispatchQueue` are all Sendable.
+/// - `units`: guarded by `lock` at every access, all ten of them. The last
+///   holdout was the "which outgoing taps are still playing" loop at the end
+///   of `applyOnWorker`, which read the dictionary bare; it now takes its
+///   snapshot under the lock and logs from that.
+///
+/// That read was not a live data race even before the fix, and the reason it
+/// was not is why it was worth fixing rather than annotating around.
+/// `applyOnWorker` is serial with itself, so the only writer that could have
+/// run alongside it is `stopAll()`, and `stopAll()` could not: both it and
+/// `apply()` are called only from `MixerStore` and the tests, which are
+/// `@MainActor`, so the main thread is inside `stopAll()` when it drains the
+/// queue and nothing can enqueue past it. The safety rested on an invariant
+/// held in another file, about which threads call this one — and `Sendable` is
+/// precisely the promise that no such invariant is needed. Conforming with the
+/// bare read still in place would have let a `stopAll()` be called from any
+/// thread with no diagnostic, putting `units.removeAll()` next to an unguarded
+/// dictionary read: a lower warning count bought by discarding the only thing
+/// the warning was protecting.
+final class AppRedirectEngine: ObservableObject, @unchecked Sendable {
     @Published private(set) var lastError: String?
     /// Live meter per (bundleID, outputUID) key, same key as `units`.
     @Published private(set) var levels: [String: MeterReading] = [:]
@@ -173,7 +214,10 @@ final class AppRedirectEngine: ObservableObject {
         // A unit whose replacement could not be built keeps running rather than
         // being stopped. Its process set is stale, but stale audio beats none,
         // and the backoff above governs when the rebuild is retried.
-        for (k, unit) in outgoing where units[k] === unit {
+        lock.lock()
+        let kept = outgoing.filter { units[$0.key] === $0.value }.keys.sorted()
+        lock.unlock()
+        for k in kept {
             NSLog("Audeon.route: keeping the existing tap for \(k); its replacement could not be built")
         }
 
