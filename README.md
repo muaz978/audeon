@@ -287,6 +287,14 @@ quarantine and it loads on most Macs, but a Mac under stricter or managed
 policy can still refuse an un-notarized system driver, and fixing that needs an
 Apple Developer membership.
 
+The package builds in the **Swift 6 language mode**, so strict concurrency
+checking is on for every target by default and the compiler rejects the class of
+data race the reliability pass previously had to find by inspection. Getting
+there took four passes and was worth more than the warning count suggests: the
+diagnostics it turns into errors surfaced a use-after-free in the driver, a
+recorder that could be fed by two audio threads at once, and a test tone whose
+render block would abort the process the moment the audio thread called it.
+
 Recent additions: cross-device hardware routes now run on a direct I/O proc
 on the private aggregate (the lower-level primitive, replacing the fragile
 shared-unit binding; gain and mute apply there, EQ and boost return to that
@@ -335,14 +343,6 @@ Still planned:
    `SHA256SUMS.txt` to that tag's draft release. Signing is the part that
    remains, and it needs a paid Apple Developer membership rather than more
    automation.
-3. Swift 6 language mode. The package still builds in Swift 5 mode. Strict
-   concurrency checking now reports 7 warnings, down from 210, and exactly one
-   of them is an error in Swift 6 mode: `MixRecorder` cannot honestly be
-   `Sendable` while its ring's single-producer requirement lives in its callers
-   rather than in the type. That is the whole of what remains.
-4. Surface a recording that fails mid-way. The writer thread records the
-   failure into a field nothing reads, so a recording that dies on a full disk
-   simply stops growing.
 
 ## License
 
