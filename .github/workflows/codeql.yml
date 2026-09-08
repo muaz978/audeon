@@ -119,5 +119,17 @@ jobs:
       - name: Show toolchain
         run: swift --version
 
+      # The zero-warning claim was made in three pull requests before anything
+      # checked it, and it was quietly false the whole time: it had only ever
+      # been measured with `swift build`, which does not build the test target,
+      # and the tests carried four warnings. An invariant nothing enforces is a
+      # habit, not an invariant -- so it is a gate now, over both targets.
+      #
+      # Package.swift is on swift-tools-version 6.0, so this is the Swift 6
+      # language mode: the concurrency diagnostics are errors here by default
+      # rather than something a developer has to remember to opt into.
+      - name: Build with warnings as errors
+        run: swift build --build-tests -Xswiftc -warnings-as-errors
+
       - name: Run tests
         run: swift test
