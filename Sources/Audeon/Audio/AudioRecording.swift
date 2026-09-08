@@ -17,7 +17,30 @@ import os
 /// rate change) the incoming format changes. Rather than hand a mismatched
 /// buffer to `AVAudioFile.write(from:)`, which raises an Objective-C exception
 /// that `try?` cannot catch, the recorder rolls over to a new numbered segment.
-final class MixRecorder {
+///
+/// Concurrency: `@unchecked Sendable`, and unlike the earlier attempt this one
+/// is earned rather than asserted. Field by field:
+///
+/// - `url`: an immutable `let URL`. `lock`, `ring`, `scratch`, `finished`:
+///   immutable `let`s; a pointer and a `DispatchSemaphore` are Sendable.
+/// - `head`, `tail`, `filled`, `ringSampleRate`, `ringChannels`,
+///   `awaitingRollover`, `stopping`, `droppedSamples`, `contendedSamples`,
+///   `reservationOutstanding`, `writerRunning`, `writeError`, `errorDelivered`:
+///   every access takes `lock`, with no exception. `deinit` reads
+///   `writerRunning` under it too, which it did not always do.
+/// - `scratch`'s pointee: written and read only inside `writerLoop`, on the one
+///   writer thread. `deinit` deallocates it, and cannot run until `finish()`
+///   has joined that thread.
+/// - `ring`'s pointee: the one region touched outside the lock, and the reason
+///   this conformance was previously withheld. A producer copies into
+///   `[start, start + count)` after `reserve` and before `publish`, while the
+///   writer copies out of a region `filled` excludes -- so the two never
+///   overlap. What was missing was any guarantee of a single producer: the copy
+///   is only exclusive if one reservation is outstanding at a time, and that
+///   was an invariant kept by callers, one of which broke it. `reserve` now
+///   refuses a second concurrent reservation itself, so the exclusivity is the
+///   type's own property and `Sendable` is a promise it can keep.
+final class MixRecorder: @unchecked Sendable {
     /// The first segment's URL. Later segments append "-2", "-3", ...
     let url: URL
 
@@ -39,13 +62,38 @@ final class MixRecorder {
     private var ringChannels = 0
     private var awaitingRollover = false
     private var stopping = false
-    private var didOverflow = false
+    /// Samples the ring had no room for. A count rather than a flag: "audio was
+    /// dropped" is not something a user can act on, "1.4 s was dropped" is.
+    private var droppedSamples = 0
+
+    /// True while a producer holds a reservation it has not published yet.
+    ///
+    /// The sample copies happen outside the lock, which is sound only while one
+    /// producer at a time owns the region being written. That used to be an
+    /// invariant the callers had to keep -- and one of them did not, which is
+    /// how two live routes came to feed one recorder. Refusing the second
+    /// reservation here makes it the type's own rule: a concurrent producer is
+    /// turned away and counted, instead of writing into a region another
+    /// producer is already filling.
+    ///
+    /// It cannot stick. Each of the three `reserve` callers runs straight-line
+    /// code to its `publish` with no early return, so a reservation always
+    /// completes.
+    private var reservationOutstanding = false
+    /// Samples refused because another producer held the reservation. Tracked
+    /// apart from `droppedSamples`: a full ring means the disk is behind, two
+    /// producers means something is wired wrong, and the second is a defect.
+    private var contendedSamples = 0
 
     private let finished = DispatchSemaphore(value: 0)
     private var writerRunning = false
 
-    /// Set once by the writer thread, read on the main thread after `finish()`.
-    private(set) var writeError: String?
+    /// Set by the writer thread when the recording has failed, and by `start()`
+    /// when a finished recorder is reused. Guarded by `lock` like everything
+    /// above it, so it can be read from whichever thread is watching -- it used
+    /// to be published with a hop to the main queue and then read by nobody.
+    private var writeError: String?
+    private var errorDelivered = false
 
     init(url: URL) {
         self.url = url
@@ -60,7 +108,10 @@ final class MixRecorder {
     deinit {
         // finish() is the supported teardown; this only covers a recorder that
         // is dropped without it.
-        if writerRunning { finish() }
+        os_unfair_lock_lock(lock)
+        let running = writerRunning
+        os_unfair_lock_unlock(lock)
+        if running { finish() }
         ring.deallocate()
         scratch.deallocate()
         lock.deinitialize(count: 1)
@@ -172,10 +223,15 @@ final class MixRecorder {
         os_unfair_lock_lock(lock)
         defer { os_unfair_lock_unlock(lock) }
         guard prepareLocked(channels: channels, sampleRate: sampleRate) else { return nil }
-        guard count <= Self.ringCapacity - filled else {
-            didOverflow = true
+        guard !reservationOutstanding else {
+            contendedSamples += count
             return nil
         }
+        guard count <= Self.ringCapacity - filled else {
+            droppedSamples += count
+            return nil
+        }
+        reservationOutstanding = true
         return head
     }
 
@@ -186,16 +242,26 @@ final class MixRecorder {
         os_unfair_lock_lock(lock)
         head = (start + count) & Self.ringMask
         filled += count
+        reservationOutstanding = false
         os_unfair_lock_unlock(lock)
     }
 
     // MARK: - Main-thread side
 
     /// Begin writing. Idempotent.
+    /// Begin writing. Idempotent, but **not** restartable: once `finish()` has
+    /// run, this instance is spent. Reusing one used to fail silently -- the
+    /// early return below, with `stopping` still true, meant every subsequent
+    /// push was dropped and the caller got an empty file and no explanation.
+    /// It is now recorded as a failure like any other.
     func start() {
         os_unfair_lock_lock(lock)
         let alreadyRunning = writerRunning
+        let alreadyFinished = stopping
         if !alreadyRunning { writerRunning = true }
+        if alreadyFinished && writeError == nil {
+            writeError = "Recording could not restart: this recorder was already finished."
+        }
         os_unfair_lock_unlock(lock)
         guard !alreadyRunning else { return }
 
@@ -342,11 +408,63 @@ final class MixRecorder {
 
     private func recordError(_ message: String) {
         NSLog("Audeon.record: %@", message)
-        DispatchQueue.main.async { self.writeError = message }
+        os_unfair_lock_lock(lock)
+        // First failure wins: the later ones are usually consequences of it,
+        // and the first is the one that explains what happened.
+        if writeError == nil { writeError = message }
+        os_unfair_lock_unlock(lock)
+    }
+
+    // MARK: - Reporting
+
+    /// Take the next problem worth telling the user about, or nil.
+    ///
+    /// Consuming: each problem is handed out once, so a watcher can poll
+    /// without repeating itself. A fatal problem means the recording has
+    /// stopped and will capture nothing more; a non-fatal one means audio was
+    /// dropped but the recording continues.
+    func takeProblem() -> RecordingProblem? {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+
+        if let message = writeError, !errorDelivered {
+            errorDelivered = true
+            return RecordingProblem(message: message, isFatal: true)
+        }
+        if contendedSamples > 0 {
+            contendedSamples = 0
+            return RecordingProblem(
+                message: "Recording is being fed from two places at once; some audio was dropped.",
+                isFatal: false)
+        }
+        guard droppedSamples > 0 else { return nil }
+        let samples = droppedSamples
+        droppedSamples = 0
+        let channels = max(ringChannels, 1)
+        let seconds = ringSampleRate > 0 ? Double(samples) / (ringSampleRate * Double(channels)) : 0
+        let amount = seconds >= 0.1 ? String(format: "%.1f s", seconds) : "a fraction of a second"
+        return RecordingProblem(
+            message: "Recording dropped \(amount) of audio: the disk could not keep up.",
+            isFatal: false)
     }
 }
 
-/// A swappable mount point for a recorder inside an audio engine. The main
+/// Something that went wrong during a recording, on its way to the user.
+struct RecordingProblem: Sendable {
+    let message: String
+    /// True when the recording has stopped and will capture nothing more. A
+    /// non-fatal problem is worth showing but the recording is still running.
+    let isFatal: Bool
+}
+
+/// A swappable mount point for a recorder inside an audio engine.
+///
+/// Concurrency: `@unchecked Sendable`. Two stored properties: `lock` is an
+/// immutable `let`, and `stored` is touched at exactly four places -- `set` and
+/// `replace` under the lock, `acquire` under a `trylock`, and `holds` under the
+/// lock -- so every access is guarded. It carries a `MixRecorder` across the
+/// main/audio boundary, which is only honest now that `MixRecorder` is itself
+/// Sendable on its own audit rather than by way of this box. The main
 /// thread assigns it; the audio callback reads it on every cycle. Keeping the
 /// indirection in one small class lets engines be rebuilt while a recording
 /// continues seamlessly on the replacement engine.
@@ -355,7 +473,7 @@ final class MixRecorder {
 /// and copies out a strong reference before use, so the main thread cannot
 /// release the recorder while a callback is inside it, and the callback never
 /// blocks on the main thread.
-final class RecorderSlot {
+final class RecorderSlot: @unchecked Sendable {
     private let lock: UnsafeMutablePointer<os_unfair_lock>
     private var stored: MixRecorder?
 
