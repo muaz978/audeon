@@ -20,7 +20,12 @@ struct RoutingCanvasView: View {
     var body: some View {
         VStack(spacing: 0) {
             addBar
-            if let err = store.router.lastError ?? store.appRedirectEngine.lastError {
+            // Recording problems come first: a route error is usually visible
+            // in the meters anyway, whereas a failed recording looks exactly
+            // like a working one until you open the file.
+            if let err = store.recordingError
+                ?? store.router.lastError
+                ?? store.appRedirectEngine.lastError {
                 errorBanner(err)
             }
             ZStack {
