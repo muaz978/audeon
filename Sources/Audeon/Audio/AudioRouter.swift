@@ -237,10 +237,39 @@ final class AudioRouter: ObservableObject, @unchecked Sendable {
         publishLiveRoutes()
     }
 
-    /// Attach or detach a recorder on a live route's engine.
-    func setRecorder(routeID: UUID, _ recorder: MixRecorder?) {
+    /// Apply the complete set of recorder mounts: every engine named in
+    /// `mounts` carries that recorder, and every engine not named carries none.
+    ///
+    /// A reconcile rather than an incremental write, which is the fix for a
+    /// real defect. The previous `setRecorder(routeID:_:)` wrote the one route
+    /// it was handed and cleared nothing, so a mount that moved between the
+    /// members of a group output stayed live on the member it left. Two engines
+    /// then held the same `MixRecorder` and fed it from two audio threads --
+    /// which its ring cannot survive, because the sample copies happen outside
+    /// its lock and `reserve` hands out the same start index to both. The old
+    /// entry point is gone rather than fixed in place: nothing should be able
+    /// to express a partial mount update.
+    func applyRecorderMounts(_ mounts: [UUID: MixRecorder]) {
+        var displaced: [MixRecorder] = []
+        lock.lock()
+        for (id, engine) in engines {
+            if let previous = engine.recorderSlot.replace(with: mounts[id]) {
+                displaced.append(previous)
+            }
+        }
+        lock.unlock()
+        // Released here, outside the router lock, for the reason `replace`
+        // exists: the last release runs `MixRecorder.deinit`, which joins the
+        // writer thread.
+        withExtendedLifetime(displaced) { displaced.removeAll() }
+    }
+
+    /// Which live routes currently hold this recorder. The invariant is that it
+    /// is never more than one -- `MixRecorder` has a single-producer ring -- so
+    /// this is the direct way to assert it.
+    func routeIDsHolding(_ recorder: MixRecorder) -> Set<UUID> {
         lock.lock(); defer { lock.unlock() }
-        engines[routeID]?.recorderSlot.set(recorder)
+        return Set(engines.filter { $0.value.recorderSlot.holds(recorder) }.keys)
     }
 
     /// True when a live engine currently carries this route id. Recording

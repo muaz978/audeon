@@ -830,6 +830,11 @@ final class MixerStore: ObservableObject {
             recordingSourceIDs.remove(id)
         }
 
+        // Collected and applied in one go. Mounting route by route left a
+        // recorder attached to a group member it had moved away from, so two
+        // live engines drove one recorder from two audio threads.
+        var deviceMounts: [UUID: MixRecorder] = [:]
+
         for source in inputs {
             let recorder = recorders[source.id]   // nil detaches
             switch source.kind {
@@ -853,7 +858,7 @@ final class MixerStore: ObservableObject {
                 } else {
                     routeID = nil
                 }
-                if let routeID { router.setRecorder(routeID: routeID, recorder) }
+                if let routeID, let recorder { deviceMounts[routeID] = recorder }
             case .app(let bundleID):
                 let outputUID: String?
                 if source.followsSystemOutput {
@@ -869,6 +874,8 @@ final class MixerStore: ObservableObject {
                 }
             }
         }
+
+        router.applyRecorderMounts(deviceMounts)
     }
 
     /// Stable per-member route id for group fan-out: the connection id with the

@@ -292,8 +292,14 @@ final class AppRedirectEngine: ObservableObject, @unchecked Sendable {
     /// Attach or detach a recorder on a live capture unit. The key is the same
     /// "bundleID|outputUID" used internally by apply().
     func setRecorder(bundleID: String, outputUID: String, _ recorder: MixRecorder?) {
-        lock.lock(); defer { lock.unlock() }
-        units[key(bundleID, outputUID)]?.recorderSlot.set(recorder)
+        lock.lock()
+        let displaced = units[key(bundleID, outputUID)]?.recorderSlot.replace(with: recorder)
+        lock.unlock()
+        // Outside the lock on purpose: the last release of a MixRecorder runs
+        // its deinit, which finishes the file and waits for the writer thread,
+        // and that must not happen while this engine's lock is held. Same
+        // reason `AudioRouter.applyRecorderMounts` defers its releases.
+        withExtendedLifetime(displaced) {}
     }
 
     /// Destroy any private aggregate devices left behind by a previous run.

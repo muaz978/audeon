@@ -135,7 +135,7 @@ final class HardwareIntegrationTests: XCTestCase {
         let target = folder.appendingPathComponent("silence.caf")
         let recorder = MixRecorder(url: target)
         recorder.start()
-        router.setRecorder(routeID: r.id, recorder)
+        router.applyRecorderMounts([r.id: recorder])
         RunLoop.current.run(until: Date().addingTimeInterval(1.0))
         recorder.finish()
         router.stopAll()
@@ -159,7 +159,7 @@ final class HardwareIntegrationTests: XCTestCase {
         let target = folder.appendingPathComponent("crossdevice.caf")
         let recorder = MixRecorder(url: target)
         recorder.start()
-        router.setRecorder(routeID: r.id, recorder)
+        router.applyRecorderMounts([r.id: recorder])
 
         let tone = try injectTone(seconds: 1.0)
         RunLoop.current.run(until: Date().addingTimeInterval(1.0))
@@ -184,7 +184,7 @@ final class HardwareIntegrationTests: XCTestCase {
         let target = folder.appendingPathComponent("stopmid.caf")
         let recorder = MixRecorder(url: target)
         recorder.start()
-        router.setRecorder(routeID: r.id, recorder)
+        router.applyRecorderMounts([r.id: recorder])
 
         let tone = try injectTone(seconds: 2.0)
         RunLoop.current.run(until: Date().addingTimeInterval(1.5))
@@ -328,4 +328,44 @@ final class HardwareIntegrationTests: XCTestCase {
                       "a cross-device route to a real output device failed to start")
         router.stopAll()
     }
+
+    /// A recorder must be mounted on at most one live route. `MixRecorder`'s
+    /// ring copies its samples outside the lock, and `reserve` hands the same
+    /// start index to concurrent producers, so two engines feeding one recorder
+    /// is a memory data race and a permanently corrupted ring -- not merely
+    /// interleaved audio.
+    ///
+    /// The mount used to be written one route at a time with nothing clearing
+    /// the previous one, so a recorder that moved between the members of a
+    /// group output stayed live on the member it had moved off.
+    func testARecorderIsNeverMountedOnTwoRoutesAtOnce() throws {
+        let outUID = try silentOutputUID()
+        let a = route(from: loopbackUID, to: outUID)
+        let b = route(from: loopbackUID, to: loopbackUID)
+        router.apply(routes: [a, b])
+        XCTAssertTrue(waitForEngine(a.id), "route A never started on real hardware")
+        XCTAssertTrue(waitForEngine(b.id), "route B never started on real hardware")
+
+        let recorder = MixRecorder(url: folder.appendingPathComponent("mount.caf"))
+        recorder.start()
+
+        router.applyRecorderMounts([a.id: recorder])
+        XCTAssertEqual(router.routeIDsHolding(recorder), [a.id],
+                       "the recorder did not mount on the route it was given")
+
+        // The mount moves to B, which is what happens when a group member goes
+        // away and the recording follows the member still playing.
+        router.applyRecorderMounts([b.id: recorder])
+        XCTAssertEqual(router.routeIDsHolding(recorder), [b.id],
+                       "still mounted on the route it moved off: two live engines would drive one single-producer ring")
+
+        // And detaching clears it everywhere rather than only where it was last.
+        router.applyRecorderMounts([:])
+        XCTAssertEqual(router.routeIDsHolding(recorder), [],
+                       "the recorder outlived its mount")
+
+        recorder.finish()
+        router.stopAll()
+    }
+
 }
