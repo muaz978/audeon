@@ -216,6 +216,84 @@ final class MixRecorderTests: XCTestCase {
         recorder.finish()
         XCTAssertEqual(try frames(at: target), 5_120)
     }
+
+    // MARK: - Reporting a failed recording
+
+    /// A recording that cannot open its file must say so. It used to record the
+    /// failure into a field nothing read, so the file simply stopped growing
+    /// and the UI went on showing a healthy recording.
+    func testAFailedRecordingReportsAFatalProblem() throws {
+        // A directory that does not exist, so AVAudioFile(forWriting:) throws.
+        let unwritable = folder
+            .appendingPathComponent("no-such-directory", isDirectory: true)
+            .appendingPathComponent("out.caf")
+        let recorder = MixRecorder(url: unwritable)
+        recorder.start()
+        push(recorder, frames: 256)
+
+        var problem: RecordingProblem?
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, problem == nil {
+            problem = recorder.takeProblem()
+            if problem == nil { Thread.sleep(forTimeInterval: 0.02) }
+        }
+        recorder.finish()
+
+        let reported = try XCTUnwrap(problem, "the recording failed and reported nothing")
+        XCTAssertTrue(reported.isFatal, "a recording that cannot write is not a warning")
+        XCTAssertTrue(reported.message.contains("recording file"),
+                      "unhelpful message: \(reported.message)")
+    }
+
+    /// Consuming, so a watcher can poll every second without repeating itself.
+    func testAProblemIsHandedOutOnlyOnce() throws {
+        let recorder = MixRecorder(url: folder
+            .appendingPathComponent("nope", isDirectory: true)
+            .appendingPathComponent("out.caf"))
+        recorder.start()
+        push(recorder, frames: 256)
+
+        var first: RecordingProblem?
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, first == nil {
+            first = recorder.takeProblem()
+            if first == nil { Thread.sleep(forTimeInterval: 0.02) }
+        }
+        recorder.finish()
+
+        XCTAssertNotNil(first)
+        XCTAssertNil(recorder.takeProblem(), "the same failure was reported twice")
+    }
+
+    /// Overflow used to set a Bool that nothing read. A count is reportable:
+    /// "some audio was dropped" is not actionable, a duration is.
+    func testDroppedAudioIsReportedWithHowMuch() throws {
+        // Deliberately not started: with no writer draining, the ring fills and
+        // then has to refuse buffers, which is exactly the overflow path.
+        let recorder = MixRecorder(url: url("overflow"))
+        for _ in 0..<2_000 { push(recorder, frames: 512) }
+
+        let problem = try XCTUnwrap(recorder.takeProblem(), "the ring overflowed and reported nothing")
+        XCTAssertFalse(problem.isFatal, "dropped audio is not fatal: the recording continues")
+        XCTAssertTrue(problem.message.contains("dropped"), "unhelpful message: \(problem.message)")
+        XCTAssertNil(recorder.takeProblem(), "the drop total was reported twice")
+    }
+
+    /// A recorder is single-use. Reusing one used to return early and discard
+    /// every later push in silence.
+    func testReusingAFinishedRecorderIsReported() throws {
+        let recorder = MixRecorder(url: url("reuse"))
+        recorder.start()
+        push(recorder, frames: 256)
+        recorder.finish()
+
+        recorder.start()
+        let problem = try XCTUnwrap(recorder.takeProblem(), "restarting a finished recorder said nothing")
+        XCTAssertTrue(problem.isFatal)
+        XCTAssertTrue(problem.message.contains("already finished"),
+                      "unhelpful message: \(problem.message)")
+    }
+
 }
 
 /// The slot is the handoff between the main thread and the audio callback.
@@ -253,4 +331,5 @@ final class RecorderSlotTests: XCTestCase {
         }
         wait(for: [done], timeout: 30)
     }
+
 }

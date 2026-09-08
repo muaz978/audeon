@@ -767,6 +767,16 @@ final class MixerStore: ObservableObject {
 
     /// Sources currently being recorded to a file.
     @Published private(set) var recordingSourceIDs: Set<UUID> = []
+
+    /// The last problem a recording reported. Shown in the canvas banner
+    /// alongside the routing and capture errors.
+    @Published var recordingError: String?
+
+    /// Polls active recordings for problems. A recording fails on the writer
+    /// thread -- a full disk, a file that stopped being writable -- and there is
+    /// no other moment at which anyone would notice: the file simply stops
+    /// growing. Runs only while something is being recorded.
+    private var recordingWatch: DispatchSourceTimer?
     private var recorders: [UUID: MixRecorder] = [:]
 
     static var recordingsFolder: URL {
@@ -785,9 +795,14 @@ final class MixerStore: ObservableObject {
     func toggleRecording(for sourceID: UUID) {
         if let recorder = recorders[sourceID] {
             recorder.finish()
+            // Drain once more after finishing: a failure in the last moments
+            // before the user pressed stop is still worth telling them about,
+            // and the writer may only have hit it while draining.
+            if let problem = recorder.takeProblem() { recordingError = problem.message }
             recorders[sourceID] = nil
             recordingSourceIDs.remove(sourceID)
             attachRecorders()   // clears the now-dead slot mapping
+            syncRecordingWatch()
         } else {
             guard let source = inputs.first(where: { $0.id == sourceID }), canRecord(source) else { return }
             try? FileManager.default.createDirectory(at: Self.recordingsFolder, withIntermediateDirectories: true)
@@ -798,8 +813,50 @@ final class MixerStore: ObservableObject {
             recorder.start()
             recorders[sourceID] = recorder
             recordingSourceIDs.insert(sourceID)
+            recordingError = nil
             attachRecorders()
+            syncRecordingWatch()
         }
+    }
+
+    /// Run the watch only while there is something to watch, the same shape the
+    /// meter pump uses.
+    private func syncRecordingWatch() {
+        guard !recorders.isEmpty else {
+            recordingWatch?.cancel()
+            recordingWatch = nil
+            return
+        }
+        guard recordingWatch == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        // A recording failure is rare and not urgent to the millisecond; once a
+        // second is often enough to be useful and cheap enough to ignore.
+        timer.schedule(deadline: .now() + 1.0, repeating: 1.0, leeway: .milliseconds(250))
+        timer.setEventHandler { [weak self] in self?.checkRecordings() }
+        timer.resume()
+        recordingWatch = timer
+    }
+
+    /// Surface anything the recordings have reported, and stop the ones that
+    /// have died. A dead recorder left mounted showed the source as still
+    /// recording while its file had stopped growing.
+    private func checkRecordings() {
+        var anyStopped = false
+        for (id, recorder) in recorders {
+            guard let problem = recorder.takeProblem() else { continue }
+            recordingError = problem.message
+            guard problem.isFatal else { continue }
+            recorder.finish()
+            recorders[id] = nil
+            recordingSourceIDs.remove(id)
+            anyStopped = true
+        }
+        // Only reconcile when a recording actually died. Reconciling on every
+        // tick would take the router lock and walk every engine once a second
+        // for the whole length of a recording, to almost always change nothing.
+        guard anyStopped else { return }
+        attachRecorders()
+        syncRecordingWatch()
     }
 
     /// Close every open recording file (used when the app quits).

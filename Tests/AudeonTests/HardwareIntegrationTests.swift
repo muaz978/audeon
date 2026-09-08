@@ -80,20 +80,18 @@ final class HardwareIntegrationTests: XCTestCase {
                                             kAudioUnitScope_Global, 0, &dev,
                                             UInt32(MemoryLayout<AudioDeviceID>.size)), noErr)
         let rate = engine.outputNode.outputFormat(forBus: 0).sampleRate
-        var phase = 0.0
-        let increment = 2.0 * Double.pi * 440.0 / rate
-        let source = AVAudioSourceNode { _, _, frames, abl -> OSStatus in
-            let buffers = UnsafeMutableAudioBufferListPointer(abl)
-            for f in 0..<Int(frames) {
-                let v = Float(sin(phase) * 0.25)
-                phase += increment
-                if phase > 2 * .pi { phase -= 2 * .pi }
-                for b in buffers {
-                    b.mData?.assumingMemoryBound(to: Float.self)[f] = v
-                }
-            }
+        // Same shape as TestTonePlayer, and for the same reason: this class is
+        // `@MainActor`, so a closure written inline here would inherit that
+        // isolation and trap when the audio thread called it.
+        let oscillator = SineOscillator(frequency: 440, sampleRate: rate)
+        let render: @Sendable (UnsafeMutablePointer<ObjCBool>,
+                               UnsafePointer<AudioTimeStamp>,
+                               AVAudioFrameCount,
+                               UnsafeMutablePointer<AudioBufferList>) -> OSStatus = { _, _, frames, abl in
+            oscillator.render(into: abl, frames: Int(frames))
             return noErr
         }
+        let source = AVAudioSourceNode(renderBlock: render)
         engine.attach(source)
         engine.connect(source, to: engine.outputNode,
                        format: AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2))
@@ -366,6 +364,25 @@ final class HardwareIntegrationTests: XCTestCase {
 
         recorder.finish()
         router.stopAll()
+    }
+
+
+    /// The test tone's render block runs on the audio thread. It used to be a
+    /// closure written inline inside `TestTonePlayer`, which is `@MainActor`,
+    /// so under the Swift 6 language mode it inherited that isolation and the
+    /// first render callback aborted the process -- a libdispatch "BUG IN
+    /// CLIENT" on the I/O thread, nowhere near anything naming the closure.
+    ///
+    /// Nothing covered the test tone at all, so that would have shipped. Plays
+    /// into a virtual output, so it stays silent like everything else here.
+    func testTheTestToneRendersWithoutTrapping() throws {
+        let uid = try silentOutputUID()
+        let deviceID = try XCTUnwrap(manager.deviceID(forUID: uid))
+        XCTAssertTrue(TestTonePlayer.shared.play(deviceID: deviceID, seconds: 0.3),
+                      "the test tone would not start")
+        // The trap happened on the first render callback, not at start, so the
+        // test has to let the audio thread actually run.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.7))
     }
 
 }
