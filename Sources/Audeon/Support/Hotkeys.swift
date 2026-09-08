@@ -2,17 +2,6 @@ import Foundation
 import AppKit
 import Carbon.HIToolbox
 
-/// `kAXTrustedCheckOptionPrompt` is imported from ApplicationServices as a
-/// mutable global, so every reference to it reads as shared mutable state under
-/// strict concurrency checking. It is a constant in practice; read it once here
-/// into a `String`, which is `Sendable`.
-///
-/// One strict-concurrency warning remains on this line and cannot be removed
-/// without hardcoding the SDK's string value, which would be worse: the
-/// annotation gap is in the imported header, not here. Only the prompting path
-/// needs the key at all — the passive check passes nil options.
-private let axTrustedCheckOptionPrompt = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-
 /// A system-wide Option-Command-A shortcut that shows or hides Audeon.
 /// Uses the Carbon hot key API, which works without any special permission.
 /// Main-actor isolated: registration and teardown are driven from Settings and
@@ -134,7 +123,18 @@ final class SuperVolumeKeys {
     /// Raises the macOS Accessibility grant prompt. Returns true only when
     /// access is already granted, since the prompt is answered out of process.
     private func requestTrust() -> Bool {
-        let options = [axTrustedCheckOptionPrompt: true] as CFDictionary
+        // AXUIElement.h declares the key as `extern CFStringRef
+        // kAXTrustedCheckOptionPrompt` with no `const`, so Swift imports it as
+        // a mutable global and any reference to it is shared mutable state --
+        // an error, not a warning, under the Swift 6 language mode. The literal
+        // is the constant's actual value, checked against the SDK rather than
+        // assumed: a probe compiled against ApplicationServices found the
+        // runtime string equal to this literal and
+        // `AXIsProcessTrustedWithOptions` returning the same answer for both.
+        // The lookup is by CFEqual, so an equal string is indistinguishable
+        // from the constant. Only this prompting path needs the key; the
+        // passive check passes nil options.
+        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         return AXIsProcessTrustedWithOptions(options)
     }
 

@@ -132,7 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Reopen onboarding on request (from Settings).
         NotificationCenter.default.addObserver(forName: .audeonShowOnboarding, object: nil, queue: .main) { [weak self] _ in
-            DispatchQueue.main.async { self?.showOnboarding() }
+            DispatchQueue.main.async { [weak self] in self?.showOnboarding() }
         }
         // Rebuild the audio engines after the machine wakes from sleep.
         NSWorkspace.shared.notificationCenter.addObserver(

@@ -165,7 +165,14 @@ final class AudioDeviceManager: ObservableObject, @unchecked Sendable {
         let sortedIn = newInputs.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         let sortedOut = newOutputs.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 
-        let apply = { [self] in
+        // `@Sendable`, not `@MainActor @Sendable`: a nonisolated function
+        // converts freely to a main-actor-isolated parameter, so the
+        // `async(execute:)` call below needs no change and no
+        // `MainActor.assumeIsolated` check is introduced. `newMap` is captured
+        // by value because a by-reference capture of a `var` in a `@Sendable`
+        // closure is diagnosed in the plain build too; nothing mutates it after
+        // this point, so the copy costs nothing.
+        let apply: @Sendable () -> Void = { [self, newMap] in
             // Publish only on change. Destroying an aggregate device fires a
             // device-list notification, so republishing unconditionally let a
             // route that could never start drive an endless

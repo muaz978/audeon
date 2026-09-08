@@ -2,6 +2,23 @@ import XCTest
 import AVFoundation
 @testable import Audeon
 
+/// Push interleaved stereo through the pointer API the I/O proc uses.
+///
+/// File scope rather than a method on the test case: the concurrency test drives
+/// this from a background queue, and a free function keeps the XCTestCase out of
+/// that `@Sendable` closure's captures. It reads nothing but its parameters.
+private func push(_ recorder: MixRecorder, frames: Int, sampleRate: Double = 48_000, value: Float = 0.25) {
+    let left = [Float](repeating: value, count: frames)
+    let right = [Float](repeating: -value, count: frames)
+    left.withUnsafeBufferPointer { l in
+        right.withUnsafeBufferPointer { r in
+            recorder.push(frames: frames, sampleRate: sampleRate, gain: 1,
+                          left: l.baseAddress!, leftStride: 1,
+                          right: r.baseAddress!, rightStride: 1)
+        }
+    }
+}
+
 /// Covers the recorder rewrite. The defect these guard against was severe: the
 /// old implementation could re-open its own file with `forWriting` while the
 /// audio thread was mid-append, truncating a finished recording to a single
@@ -26,19 +43,6 @@ final class MixRecorderTests: XCTestCase {
     private func frames(at url: URL) throws -> AVAudioFramePosition {
         let file = try AVAudioFile(forReading: url)
         return file.length
-    }
-
-    /// Push interleaved stereo through the pointer API the I/O proc uses.
-    private func push(_ recorder: MixRecorder, frames: Int, sampleRate: Double = 48_000, value: Float = 0.25) {
-        var left = [Float](repeating: value, count: frames)
-        var right = [Float](repeating: -value, count: frames)
-        left.withUnsafeBufferPointer { l in
-            right.withUnsafeBufferPointer { r in
-                recorder.push(frames: frames, sampleRate: sampleRate, gain: 1,
-                              left: l.baseAddress!, leftStride: 1,
-                              right: r.baseAddress!, rightStride: 1)
-            }
-        }
     }
 
     // MARK: - The headline fix
@@ -67,7 +71,7 @@ final class MixRecorderTests: XCTestCase {
         // `forWriting` and reduce the recording to one buffer.
         let pushing = expectation(description: "pusher finished")
         DispatchQueue.global().async {
-            for _ in 0..<400 { self.push(recorder, frames: 256) }
+            for _ in 0..<400 { push(recorder, frames: 256) }
             pushing.fulfill()
         }
         Thread.sleep(forTimeInterval: 0.05)
@@ -160,7 +164,7 @@ final class MixRecorderTests: XCTestCase {
         let target = url("mono")
         let recorder = MixRecorder(url: target)
         recorder.start()
-        var mono = [Float](repeating: 0.5, count: 512)
+        let mono = [Float](repeating: 0.5, count: 512)
         for _ in 0..<10 {
             mono.withUnsafeBufferPointer { m in
                 recorder.push(frames: 512, sampleRate: 48_000, gain: 1,
@@ -178,7 +182,7 @@ final class MixRecorderTests: XCTestCase {
         let target = url("gain")
         let recorder = MixRecorder(url: target)
         recorder.start()
-        var samples = [Float](repeating: 1.0, count: 512)
+        let samples = [Float](repeating: 1.0, count: 512)
         samples.withUnsafeBufferPointer { s in
             recorder.push(frames: 512, sampleRate: 48_000, gain: 0.5,
                           left: s.baseAddress!, leftStride: 1, right: nil, rightStride: 1)

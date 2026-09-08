@@ -24,7 +24,7 @@ final class HardwareIntegrationTests: XCTestCase {
     /// output appears on its input.
     private let loopbackUID = audeonVirtualDeviceUID
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["AUDEON_HW_TESTS"] == "1",
                           "set AUDEON_HW_TESTS=1 to run against real audio hardware")
         manager = AudioDeviceManager()
@@ -36,7 +36,7 @@ final class HardwareIntegrationTests: XCTestCase {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         router?.stopAll()
         if let folder { try? FileManager.default.removeItem(at: folder) }
     }
