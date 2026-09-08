@@ -132,6 +132,29 @@ On first launch macOS asks for microphone access, which is needed to read input
 devices. If you miss the prompt, enable it under
 System Settings > Privacy & Security > Microphone.
 
+## Tests
+
+```bash
+swift test
+```
+
+That runs the pure-logic suite: persistence and schema migration, restoring the
+system output device, Output Group expansion, reordering, and the recording ring
+buffer's wrap, rollover and concurrent-append behaviour.
+
+The hardware suite is skipped unless you opt in:
+
+```bash
+AUDEON_HW_TESTS=1 swift test
+```
+
+Those tests build real routes through real Core Audio devices and record them.
+They are deliberately silent -- every route runs between virtual devices, so
+nothing reaches a speaker and the system's default output is never touched --
+and they skip themselves if the Audeon driver is not installed. They need the
+virtual driver plus one other virtual output (BlackHole works) to have something
+to route between.
+
 ## Cutting a release
 
 Both shipping artifacts are produced by the `Release` workflow, so a release is
@@ -259,8 +282,10 @@ Audeon-branded AudioServerPlugIn (based on the BlackHole source, GPL-3.0)
 that installs as an "Audeon Stream" device, with install, verify, and
 one-command recovery scripts. The app detects it and uses it for one-click
 system audio capture; OBS, Discord, and Zoom can select it directly. It is
-ad hoc signed for now, so it loads on the machine that built it; a notarized
-build for general distribution needs an Apple Developer membership.
+ad hoc signed rather than notarized: the packaged installer clears the download
+quarantine and it loads on most Macs, but a Mac under stricter or managed
+policy can still refuse an un-notarized system driver, and fixing that needs an
+Apple Developer membership.
 
 Recent additions: cross-device hardware routes now run on a direct I/O proc
 on the private aggregate (the lower-level primitive, replacing the fragile
@@ -310,20 +335,14 @@ Still planned:
    `SHA256SUMS.txt` to that tag's draft release. Signing is the part that
    remains, and it needs a paid Apple Developer membership rather than more
    automation.
-3. A Swift test target. There is none today, so nothing catches a regression in
-   the pure-logic paths: persistence and schema migration, choosing a device to
-   restore the system output to, Output Group expansion, and the recording ring
-   buffer's wrap and rollover behaviour.
-4. Swift 6 language mode. The package still builds in Swift 5 mode, so strict
-   concurrency checking is off and the compiler catches none of the data races
-   the reliability pass had to find by inspection.
-5. Two known driver races, both torn values affecting timing and mute rather
-   than memory safety: the zero-timestamp state is written under one mutex and
-   read under another, and two function-level statics in `DoIOOperation` are
-   shared between both devices' IO threads.
-6. Update a live process tap's process list in place. Today a genuine change to
-   an app's audio processes rebuilds the tap, which briefly drops that app's
-   audio.
+3. Swift 6 language mode. The package still builds in Swift 5 mode. Strict
+   concurrency checking now reports 7 warnings, down from 210, and exactly one
+   of them is an error in Swift 6 mode: `MixRecorder` cannot honestly be
+   `Sendable` while its ring's single-producer requirement lives in its callers
+   rather than in the type. That is the whole of what remains.
+4. Surface a recording that fails mid-way. The writer thread records the
+   failure into a field nothing reads, so a recording that dies on a full disk
+   simply stops growing.
 
 ## License
 
